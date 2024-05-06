@@ -1,0 +1,10 @@
+[package]
+name = "dynamic-renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# harfbuzz    = {version="0.6", features=["freetype", "bundled"]}
+# freetype-rs = "0.36"
+winit       = "0.30"
+ash         = "0.38"
