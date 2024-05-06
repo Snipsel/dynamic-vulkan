@@ -1,1 +1,8 @@
-/target
+/*
+!/.gitignore
+!/cargo.toml
+!/cargo.lock
+!/src
+!/shaders
+
+
