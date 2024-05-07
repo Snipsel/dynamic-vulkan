@@ -448,18 +448,23 @@ impl<'a> Frame<'a> {
         unsafe{self.renderer.ext_shader_object.cmd_set_sample_mask(self.renderer.command_buffer, samples, sample_mask)};
     }
     pub fn set_alpha_to_coverage_enable(&mut self, enable: bool){
+        self.dynamic_state_flags |= DynamicStateFlags::ALPHA_TO_COVERAGE_ENABLE ;
         unsafe{self.renderer.ext_shader_object.cmd_set_alpha_to_coverage_enable(self.renderer.command_buffer, enable)};
     }
     pub fn set_cull_mode(&mut self, cullmode: vk::CullModeFlags){
+        self.dynamic_state_flags |= DynamicStateFlags::SET_CULL_MODE;
         unsafe{self.renderer.ext_shader_object.cmd_set_cull_mode(self.renderer.command_buffer, cullmode)};
     }
     pub fn set_color_blend_enable(&mut self, enables: &[u32]){
+        self.dynamic_state_flags |= DynamicStateFlags::COLOR_BLEND_ENABLE;
         unsafe{self.renderer.ext_shader_object.cmd_set_color_blend_enable(self.renderer.command_buffer, 0, &enables)};
     }
     pub fn set_color_blend_equation(&mut self, equations: &[vk::ColorBlendEquationEXT]){
+        self.dynamic_state_flags |= DynamicStateFlags::COLOR_BLEND_EQUATION;
         unsafe{self.renderer.ext_shader_object.cmd_set_color_blend_equation(self.renderer.command_buffer, 0, &equations)};
     }
     pub fn set_color_write_mask(&mut self, write_masks: &[vk::ColorComponentFlags]){
+        self.dynamic_state_flags |= DynamicStateFlags::COLOR_WRITE_MASK;
         unsafe{self.renderer.ext_shader_object.cmd_set_color_write_mask(self.renderer.command_buffer, 0, &write_masks)};
     }
 
@@ -469,7 +474,6 @@ impl<'a> Frame<'a> {
                 .x(0.0).y(0.0).min_depth(0.0).max_depth(1.0)
                 .width(self.renderer.swapchain_extent.width as f32)
                 .height(self.renderer.swapchain_extent.height as f32);
-        
         if !self.dynamic_state_flags.contains(DynamicStateFlags::VIEWPORTS                ){ self.set_viewports(&[default_viewport]); }
         if !self.dynamic_state_flags.contains(DynamicStateFlags::SCISSORS                 ){ self.set_scissors(&[self.renderer.swapchain_extent.into()]); }
         if !self.dynamic_state_flags.contains(DynamicStateFlags::POLYGON_MODE             ){ self.set_polygon_mode(vk::PolygonMode::FILL); }
