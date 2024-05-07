@@ -3,6 +3,7 @@ use std::{
     fmt,
     ffi::{CStr,OsStr}
 };
+use core::mem::size_of;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -34,6 +35,7 @@ pub struct Renderer{
     pub surface:  SurfaceKHR,
     pub device:   Device,
     pub queue:    Queue,
+    pub fam_idx:  u32,
     pub surface_format:   SurfaceFormatKHR,
     pub swapchain:        SwapchainKHR,
     pub swapchain_extent: Extent2D,
@@ -44,6 +46,8 @@ pub struct Renderer{
     pub ready_to_submit: Semaphore,
     pub ready_to_record: Fence,
     pub ready_to_present: Semaphore,
+    pub push_constant_range: [vk::PushConstantRange; 1],
+    pub push_constant_layout: vk::PipelineLayout,
     pub khr_display:    khr::display::Instance,
     pub khr_surface:    khr::surface::Instance,
     pub khr_swapchain:  khr::swapchain::Device,
@@ -123,10 +127,10 @@ impl Renderer {
         (swapchain, swapchain_images, swapchain_views, swapchain_extent)
     }
     fn destroy_swapchain(&self){
+        // Note: swapchain images are owned by the the swapchain, so we only have to free the views
         for view in self.swapchain_views.iter() {
             unsafe{self.device.destroy_image_view(*view, None)};
         }
-        // Note: swapchain images are owned by the the swapchain, so we don't free them!
         unsafe{self.khr_swapchain.destroy_swapchain(self.swapchain, None)};
     }
     fn recreate_swapchain(&mut self){
@@ -241,13 +245,29 @@ impl Renderer {
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         let ready_to_record = unsafe{device.create_fence(&fence_info, None)}.unwrap();
         
+        let push_constant_range = [vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::VERTEX)
+            .size(4*size_of::<f32>() as u32)];
+        let push_constant_info = vk::PipelineLayoutCreateInfo::default()
+            .push_constant_ranges(&push_constant_range);
+        let push_constant_layout = unsafe{ device.create_pipeline_layout(&push_constant_info, None) }.unwrap();
 
-        Self{ window, entry, instance, gpu, surface, device, queue, surface_format, swapchain, swapchain_extent, swapchain_images, swapchain_views, command_pool, command_buffer, ready_to_submit, ready_to_present, ready_to_record, khr_display, khr_surface,  khr_swapchain, khr_dynamic_rendering, ext_shader_object }
+        Self{ window, entry, instance, gpu, surface, device, queue, fam_idx, push_constant_range, push_constant_layout, surface_format, swapchain, swapchain_extent, swapchain_images, swapchain_views, command_pool, command_buffer, ready_to_submit, ready_to_present, ready_to_record, khr_display, khr_surface,  khr_swapchain, khr_dynamic_rendering, ext_shader_object }
     }
 
+    //pub fn map_memory(&self, size: u64) -> &[u8] {
+    //    let fam_idx = [self.fam_idx];
+    //    let buffer_info = vk::BufferCreateInfo::default()
+    //        .queue_family_indices(&fam_idx)
+    //        .size(size)
+    //        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+    //        .usage(vk::BufferUsageFlags::TRANSFER_SRC);
+    //    let buf = unsafe{self.device.create_buffer(&buffer_info, None)}.unwrap();
+    //    todo!()
+    //}
+
     pub fn load_shader_vs_fs<P:?Sized+AsRef<std::path::Path>>(&self,
-                             vs_spv_path: &P, 
-                             fs_spv_path: &P) -> [ShaderEXT;2] {
+                             vs_spv_path: &P, fs_spv_path: &P) -> [ShaderEXT;2] {
+        let push_constants_ranges = [vk::PushConstantRange::default().size(2*size_of::<f32>() as u32)];
         let vs = match std::fs::read(vs_spv_path) {
             Ok(vs) => vs,
             Err(e) => { panic!("\n{ERR_STR} could not read vertex shader\n{}\n{e}\n", pretty_print_path(vs_spv_path)) }
@@ -263,14 +283,16 @@ impl Renderer {
                 .next_stage(vk::ShaderStageFlags::FRAGMENT)
                 .code_type(vk::ShaderCodeTypeEXT::SPIRV)
                 .code(&vs)
-                .name(c"main"),
+                .name(c"main")
+                .push_constant_ranges(&self.push_constant_range),
             vk::ShaderCreateInfoEXT::default()
                 .flags(vk::ShaderCreateFlagsEXT::LINK_STAGE)
                 .stage(vk::ShaderStageFlags::FRAGMENT)
-                .next_stage(vk::ShaderStageFlags::from_raw(0))
+                .next_stage(vk::ShaderStageFlags::empty())
                 .code_type(vk::ShaderCodeTypeEXT::SPIRV)
                 .code(&fs)
-                .name(c"main"),
+                .name(c"main")
+                .push_constant_ranges(&self.push_constant_range),
         ];
         match unsafe{ self.ext_shader_object.create_shaders(&shader_infos, None) } {
             Ok(ret) => [ret[0], ret[1]],
@@ -353,7 +375,7 @@ impl<'a> Frame<'a> {
         let begin_info = vk::CommandBufferBeginInfo::default();
         unsafe{renderer.device.begin_command_buffer(renderer.command_buffer, &begin_info)}.unwrap();
 
-        // begin frame
+        // transition image from present-optimal to render-optimal
         let image_memory_barriers = [
             vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
@@ -468,6 +490,7 @@ impl<'a> Frame<'a> {
         unsafe{self.renderer.ext_shader_object.cmd_set_color_write_mask(self.renderer.command_buffer, 0, &write_masks)};
     }
 
+    // vulkan requires us to set these things before rendering
     fn apply_unset_defaults(&mut self){
         let default_viewport : vk::Viewport = 
             vk::Viewport::default()
@@ -503,6 +526,13 @@ impl<'a> Frame<'a> {
         let stages  = [vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT];
         let shaders = [vs, fs];
         unsafe{self.renderer.ext_shader_object.cmd_bind_shaders(self.renderer.command_buffer, &stages, &shaders)};
+    }
+
+    pub fn push_constant<T>(&self, data:&T){
+        let ptr = core::ptr::from_ref(data);
+        let byte_ptr = unsafe{core::mem::transmute::<*const T,*const u8>(ptr)};
+        let bytes = unsafe{core::slice::from_raw_parts(byte_ptr, size_of::<T>())};
+        unsafe{self.renderer.device.cmd_push_constants(self.renderer.command_buffer, self.renderer.push_constant_layout, vk::ShaderStageFlags::VERTEX, 0, bytes)};
     }
 }
 

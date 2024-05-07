@@ -33,7 +33,6 @@ enum App{
     },
 }
 
-
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         match self {
@@ -41,7 +40,7 @@ impl ApplicationHandler for App {
             App::Uninitialized => {
                 let renderer = renderer::Renderer::new(event_loop);
                 renderer.debug_print();
-                let [vs,fs] = renderer.load_shader_vs_fs("vert.spv", "frag.spv");
+                let [vs,fs] = renderer.load_shader_vs_fs("triangle.vert.spv", "triangle.frag.spv");
                 println!("initialized!!");
                 *self = App::Resumed{ renderer, vs, fs };
             },
@@ -57,8 +56,12 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let App::Resumed{renderer,vs,fs} = self else { panic!("not active!") };
                 println!("================================================================================");
+                let winsize = renderer.window.inner_size();
+                let win_w = winsize.width as f32;
+                let win_h = winsize.height as f32;
                 let mut frame = renderer.new_frame();
                 frame.bind_vs_fs(*vs, *fs);
+                frame.push_constant(&[1.0/win_w, 1.0/win_h, win_w, win_h]);
                 frame.draw(3,1,0,0);
             },
             _ => (),
