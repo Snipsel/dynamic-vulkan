@@ -11,9 +11,7 @@ use winit::{
     window::{Window,WindowId}
 };
 use ash::{
-     Device, Entry, Instance,
-    ext, khr,
-    vk::{self, Handle, Image, ImageView, InstanceCreateInfo, CommandPool, CommandBuffer, PhysicalDevice, Queue, ShaderEXT, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, Semaphore, Fence},
+     ext, khr, vk::{self, CommandBuffer, CommandPool, Fence, Handle, Image, ImageView, InstanceCreateInfo, PhysicalDevice, Queue, Semaphore, ShaderEXT, SurfaceCapabilitiesKHR, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, Extent2D}, Device, Entry, Instance
 };
 use bitflags::bitflags;
 
@@ -38,13 +36,14 @@ pub struct Renderer{
     pub queue:    Queue,
     pub surface_format:   SurfaceFormatKHR,
     pub swapchain:        SwapchainKHR,
-    pub swapchain_extent: vk::Extent2D,
+    pub swapchain_extent: Extent2D,
     pub swapchain_images: Vec<Image>,
     pub swapchain_views:  Vec<ImageView>,
     pub command_pool:     CommandPool,
     pub command_buffer:   CommandBuffer,
-    pub image_available: Semaphore,
-    pub render_finished: Semaphore,
+    pub ready_to_submit: Semaphore,
+    pub ready_to_record: Fence,
+    pub ready_to_present: Semaphore,
     pub khr_display:    khr::display::Instance,
     pub khr_surface:    khr::surface::Instance,
     pub khr_swapchain:  khr::swapchain::Device,
@@ -77,6 +76,66 @@ impl Renderer {
             },
             _ => panic!("unsupported window!"),
         }
+    }
+
+    fn create_swapchain(window:&Window, gpu:&PhysicalDevice, device:&Device, khr_swapchain: &khr::swapchain::Device, khr_surface: &khr::surface::Instance, surface: SurfaceKHR, surface_format:SurfaceFormatKHR)
+            -> (SwapchainKHR, Vec<Image>, Vec<ImageView>, Extent2D) {
+        let capabilities = unsafe{khr_surface.get_physical_device_surface_capabilities(*gpu, surface)}.unwrap();
+        let swapchain_extent = match capabilities.current_extent {
+            Extent2D{width:u32::MAX, height:u32::MAX} => {
+                let size = window.inner_size();
+                let min = capabilities.max_image_extent;
+                let max = capabilities.max_image_extent;
+                vk::Extent2D{
+                    width:  size.width.clamp(min.width, max.width),
+                    height: size.height.clamp(min.height, max.height),
+                }
+            },
+            x => x,
+        };
+        let swapchain_info = SwapchainCreateInfoKHR::default()
+            .surface(surface)
+            .min_image_count(capabilities.max_image_count.min(capabilities.min_image_count+1))
+            .image_format(surface_format.format)
+            .image_color_space(surface_format.color_space)
+            .image_extent(swapchain_extent)
+            .image_array_layers(1)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
+            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE);
+        let swapchain = unsafe{khr_swapchain.create_swapchain(&swapchain_info, None)}.unwrap();
+        let swapchain_images = unsafe{khr_swapchain.get_swapchain_images(swapchain)}.unwrap();
+        let swapchain_views : Vec<_> = swapchain_images.iter().map(|img|{
+            let info = vk::ImageViewCreateInfo::default()
+                .image(*img)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(surface_format.format)
+                .components(vk::ComponentMapping::default())
+                .subresource_range(vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1));
+            unsafe{ device.create_image_view(&info, None) }.unwrap()
+        }).collect();
+
+        (swapchain, swapchain_images, swapchain_views, swapchain_extent)
+    }
+    fn destroy_swapchain(&self){
+        for view in self.swapchain_views.iter() {
+            unsafe{self.device.destroy_image_view(*view, None)};
+        }
+        // Note: swapchain images are owned by the the swapchain, so we don't free them!
+        unsafe{self.khr_swapchain.destroy_swapchain(self.swapchain, None)};
+    }
+    fn recreate_swapchain(&mut self){
+        self.destroy_swapchain();
+        let (swapchain, swapchain_images, swapchain_views, swapchain_extent) = Self::create_swapchain(&self.window, &self.gpu, &self.device, &self.khr_swapchain, &self.khr_surface, self.surface, self.surface_format);
+        self.swapchain = swapchain;
+        self.swapchain_images = swapchain_images;
+        self.swapchain_views = swapchain_views;
+        self.swapchain_extent = swapchain_extent;
     }
 
     pub fn new(event_loop: &ActiveEventLoop) -> Self {
@@ -148,8 +207,6 @@ impl Renderer {
 
         let mut feature_shader_object     = vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
         let mut feature_dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
-        //[ext::shader_object::NAME.as_ptr()];
-        //let req_ext : = &required_device_extensions.iter().map(|x|x.as_ptr()).collect();
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&required_device_extensions)
@@ -162,46 +219,7 @@ impl Renderer {
         println!("device ready!");
 
         //let present_modes = unsafe{khr_surface.get_physical_device_surface_present_modes(gpu, surface)}.unwrap();
-        let capabilities = unsafe{khr_surface.get_physical_device_surface_capabilities(gpu, surface)}.unwrap();
-        let swapchain_extent = match capabilities.current_extent {
-            vk::Extent2D{width:u32::MAX, height:u32::MAX} => {
-                let size = window.inner_size();
-                let min = capabilities.max_image_extent;
-                let max = capabilities.max_image_extent;
-                vk::Extent2D{
-                    width:  size.width.clamp(min.width, max.width),
-                    height: size.height.clamp(min.height, max.height),
-                }
-            },
-            x => x,
-        };
-        let swapchain_info = SwapchainCreateInfoKHR::default()
-            .surface(surface)
-            .min_image_count(capabilities.max_image_count.min(capabilities.min_image_count+1))
-            .image_format(surface_format.format)
-            .image_color_space(surface_format.color_space)
-            .image_extent(swapchain_extent)
-            .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-            .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE);
-        let swapchain = unsafe{khr_swapchain.create_swapchain(&swapchain_info, None)}.unwrap();
-        let swapchain_images = unsafe{khr_swapchain.get_swapchain_images(swapchain)}.unwrap();
-
-        let swapchain_views : Vec<_> = swapchain_images.iter().map(|img|{
-            let info = vk::ImageViewCreateInfo::default()
-                .image(*img)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(surface_format.format)
-                .components(vk::ComponentMapping::default())
-                .subresource_range(vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1));
-            unsafe{ device.create_image_view(&info, None) }.unwrap()
-        }).collect();
+        let (swapchain, swapchain_images, swapchain_views, swapchain_extent) = Self::create_swapchain(&window, &gpu, &device, &khr_swapchain, &khr_surface, surface, surface_format);
 
         let khr_dynamic_rendering = khr::dynamic_rendering::Device::new(&instance, &device);
         let ext_shader_object     = ext::shader_object::Device::new(&instance, &device);
@@ -218,14 +236,13 @@ impl Renderer {
         let [command_buffer] = unsafe{device.allocate_command_buffers(&alloc_info)}.unwrap()[..] else {panic!("got more buffers than expected")};
 
         let semaphore_info = vk::SemaphoreCreateInfo::default();
-        let image_available = unsafe{device.create_semaphore(&semaphore_info, None)}.unwrap();
-        let render_finished = unsafe{device.create_semaphore(&semaphore_info, None)}.unwrap();
-
-        //let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        //let render_finished = unsafe{device.create_fence(&fence_info, None)}.unwrap();
+        let ready_to_submit = unsafe{device.create_semaphore(&semaphore_info, None)}.unwrap();
+        let ready_to_present = unsafe{device.create_semaphore(&semaphore_info, None)}.unwrap();
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        let ready_to_record = unsafe{device.create_fence(&fence_info, None)}.unwrap();
         
 
-        Self{ window, entry, instance, gpu, surface, device, queue, surface_format, swapchain, swapchain_extent, swapchain_images, swapchain_views, command_pool, command_buffer, image_available, render_finished, khr_display, khr_surface,  khr_swapchain, khr_dynamic_rendering, ext_shader_object }
+        Self{ window, entry, instance, gpu, surface, device, queue, surface_format, swapchain, swapchain_extent, swapchain_images, swapchain_views, command_pool, command_buffer, ready_to_submit, ready_to_present, ready_to_record, khr_display, khr_surface,  khr_swapchain, khr_dynamic_rendering, ext_shader_object }
     }
 
     pub fn load_shader_vs_fs<P:?Sized+AsRef<std::path::Path>>(&self,
@@ -271,6 +288,8 @@ impl Renderer {
         }
     }
 
+    pub fn new_frame(&mut self) -> Frame { Frame::new(self) }
+
     pub fn debug_print(&self){
         let properties = unsafe{self.instance.get_physical_device_properties(self.gpu)};
         let name = properties.device_name_as_c_str().unwrap().to_str().unwrap();
@@ -289,18 +308,45 @@ impl Renderer {
     }
 }
 
+impl Drop for Renderer {
+    fn drop(&mut self){
+        println!("todo! implement drop for renderer");
+    }
+}
+
+
 pub struct Frame<'a>{
-    renderer : &'a Renderer,
+    renderer : &'a mut Renderer,
     swap_idx : u32,
     dynamic_state_flags : DynamicStateFlags,
 }
-
 impl<'a> Frame<'a> {
-    pub fn begin(renderer: &'a Renderer) -> Self {
-        // begin frame
-        //unsafe{renderer.device.wait_for_fences(&[renderer.render_finished], true, u64::MAX)};
-        //unsafe{renderer.device.reset_fences(&[renderer.render_finished])};
-        let (swap_idx,_) = unsafe{renderer.khr_swapchain.acquire_next_image(renderer.swapchain, u64::MAX, renderer.image_available, Fence::null())}.unwrap();
+
+    pub fn new(renderer: &'a mut Renderer) -> Self {
+        // Synchronisation
+        // three primitives:
+        //  - ready_to_record:  signaled by VkQueueSubmit, awaited by host before vkAcquireNextImageKHR
+        //  - ready_to_submit:  signaled by vkAcquireNextImageKHR, awaited by vkQueueSubmit
+        //  - ready_to_present: signaled by vkQueueSubmit, awaited by vkQueuePresentKHR
+        unsafe{renderer.device.wait_for_fences(&[renderer.ready_to_record], true, u64::MAX)};
+        unsafe{renderer.device.reset_fences(&[renderer.ready_to_record])};
+
+        let swap_idx = loop{
+            let swap_idx = match unsafe{renderer.khr_swapchain.acquire_next_image(renderer.swapchain, u64::MAX, renderer.ready_to_submit, Fence::null())} {
+                Ok((swap_idx, false)) => break swap_idx,
+                Ok((swap_idx, true)) => {
+                    println!("resize! (aquire_next_image suboptimal)");
+                    renderer.recreate_swapchain();
+                },
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    println!("resize! (aquire_next_image out of date)");
+                    renderer.recreate_swapchain();
+                },
+                Err(e) => {
+                    panic!("error: {e}\n");
+                }
+            };
+        };
 
         // begin command buffer
         unsafe{renderer.device.reset_command_buffer(renderer.command_buffer, vk::CommandBufferResetFlags::empty())};
@@ -351,57 +397,6 @@ impl<'a> Frame<'a> {
         let dynamic_state_flags = DynamicStateFlags::empty();
 
         Self{ renderer, swap_idx, dynamic_state_flags}
-    }
-
-    pub fn end(&self) {
-        let renderer = self.renderer;
-        let swap_idx = self.swap_idx;
-        // end rendering
-        unsafe{renderer.khr_dynamic_rendering.cmd_end_rendering(renderer.command_buffer)};
-
-        // end frame
-        let image_memory_barriers = [
-            vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .image(renderer.swapchain_images[swap_idx as usize])
-                .subresource_range(vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1))
-        ];
-        unsafe{renderer.device.cmd_pipeline_barrier(renderer.command_buffer,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            vk::DependencyFlags::empty(),
-            &[], &[], &image_memory_barriers)};
-
-
-        // end command buffer
-        unsafe{renderer.device.end_command_buffer(renderer.command_buffer)}.unwrap();
-
-        // submit queue
-        let wait_semaphores = [renderer.image_available];
-        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let command_buffers = [renderer.command_buffer];
-        let signal_semaphores = [renderer.render_finished];
-        let submit_info = vk::SubmitInfo::default()
-            .wait_semaphores(&wait_semaphores)
-            .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(&command_buffers)
-            .signal_semaphores(&signal_semaphores);
-        unsafe{renderer.device.queue_submit(renderer.queue, &[submit_info], vk::Fence::null())}.unwrap();
-
-        let swapchains = [renderer.swapchain];
-        let image_indices = [swap_idx];
-        let present_info = vk::PresentInfoKHR::default()
-            .wait_semaphores(&signal_semaphores)
-            .swapchains(&swapchains)
-            .image_indices(&image_indices);
-        unsafe{renderer.khr_swapchain.queue_present(renderer.queue, &present_info)}.unwrap();
     }
 
     pub fn set_viewports(&mut self, viewports : &[vk::Viewport]){
@@ -504,6 +499,72 @@ impl<'a> Frame<'a> {
         let stages  = [vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT];
         let shaders = [vs, fs];
         unsafe{self.renderer.ext_shader_object.cmd_bind_shaders(self.renderer.command_buffer, &stages, &shaders)};
+    }
+}
+
+impl Drop for Frame<'_> {
+    fn drop(&mut self){
+        let renderer = &self.renderer;
+        let swap_idx = self.swap_idx;
+        // end rendering
+        unsafe{renderer.khr_dynamic_rendering.cmd_end_rendering(renderer.command_buffer)};
+
+        // end frame
+        let image_memory_barriers = [
+            vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .image(renderer.swapchain_images[swap_idx as usize])
+                .subresource_range(vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1))
+        ];
+        unsafe{renderer.device.cmd_pipeline_barrier(renderer.command_buffer,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            vk::DependencyFlags::empty(),
+            &[], &[], &image_memory_barriers)};
+
+
+        // end command buffer
+        unsafe{renderer.device.end_command_buffer(renderer.command_buffer)}.unwrap();
+
+        // submit queue
+        let wait_semaphores = [renderer.ready_to_submit];
+        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let command_buffers = [renderer.command_buffer];
+        let signal_semaphores = [renderer.ready_to_present];
+        let submit_info = vk::SubmitInfo::default()
+            .wait_semaphores(&wait_semaphores)
+            .wait_dst_stage_mask(&wait_stages)
+            .command_buffers(&command_buffers)
+            .signal_semaphores(&signal_semaphores);
+        unsafe{renderer.device.queue_submit(renderer.queue, &[submit_info], renderer.ready_to_record)}.unwrap();
+
+        let swapchains = [renderer.swapchain];
+        let image_indices = [swap_idx];
+        let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&signal_semaphores)
+            .swapchains(&swapchains)
+            .image_indices(&image_indices);
+        match unsafe{renderer.khr_swapchain.queue_present(renderer.queue, &present_info)} {
+            Ok(false) => (),
+            Ok(true) => {
+                println!("resize! (queue present suboptimal)");
+                self.renderer.recreate_swapchain();
+                self.renderer.window.request_redraw();
+            },
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                println!("resize! (queue present out of date)");
+                self.renderer.recreate_swapchain();
+                self.renderer.window.request_redraw();
+            },
+            Err(e) => panic!("queue present error: {e}"),
+        }
     }
 }
 

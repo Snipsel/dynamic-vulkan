@@ -57,10 +57,9 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let App::Resumed{renderer,vs,fs} = self else { panic!("not active!") };
                 println!("================================================================================");
-                let mut frame = renderer::Frame::begin(&renderer);
+                let mut frame = renderer.new_frame();
                 frame.bind_vs_fs(*vs, *fs);
                 frame.draw(3,1,0,0);
-                frame.end();
             },
             _ => (),
         }

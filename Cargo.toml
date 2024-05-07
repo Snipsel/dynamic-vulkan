@@ -3,6 +3,19 @@ name = "dynamic-renderer"
 version = "0.1.0"
 edition = "2021"
 
+[profile.dev]
+panic="abort"
+
+[profile.release]
+panic="abort"
+strip="symbols"
+
+[profile.test]
+panic="abort"
+
+[profile.bench]
+panic="abort"
+
 [dependencies]
 # harfbuzz    = {version="0.6", features=["freetype", "bundled"]}
 # freetype-rs = "0.36"
