@@ -12,7 +12,7 @@ use winit::{
     window::{Window,WindowId}
 };
 use ash::{
-     ext, khr, vk::{self, CommandBuffer, CommandPool, Fence, Handle, Image, ImageView, InstanceCreateInfo, PhysicalDevice, Queue, Semaphore, ShaderEXT, SurfaceCapabilitiesKHR, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, Extent2D}, Device, Entry, Instance
+     ext, khr, vk::{self, CommandBuffer, CommandPool, Fence, Handle, Image, ImageView, InstanceCreateInfo, PhysicalDevice, Queue, Semaphore, ShaderEXT, SurfaceCapabilitiesKHR, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, Extent2D, PhysicalDeviceMemoryProperties}, Device, Entry, Instance
 };
 use bitflags::bitflags;
 
@@ -32,10 +32,14 @@ pub struct Renderer{
     pub entry:    Entry,
     pub instance: Instance,
     pub gpu:      PhysicalDevice,
+    pub memory_properties: PhysicalDeviceMemoryProperties,
+    pub bar_memory_idx: Option<u32>,
+    pub gpu_memory_idx: u32,
     pub surface:  SurfaceKHR,
     pub device:   Device,
     pub queue:    Queue,
     pub fam_idx:  u32,
+    pub descriptor_pool: vk::DescriptorPool,
     pub surface_format:   SurfaceFormatKHR,
     pub swapchain:        SwapchainKHR,
     pub swapchain_extent: Extent2D,
@@ -46,8 +50,6 @@ pub struct Renderer{
     pub ready_to_submit: Semaphore,
     pub ready_to_record: Fence,
     pub ready_to_present: Semaphore,
-    pub push_constant_range: [vk::PushConstantRange; 1],
-    pub push_constant_layout: vk::PipelineLayout,
     pub khr_display:    khr::display::Instance,
     pub khr_surface:    khr::surface::Instance,
     pub khr_swapchain:  khr::swapchain::Device,
@@ -156,13 +158,18 @@ impl Renderer {
 
         let required_device_extensions = [
             khr::swapchain::NAME, 
-            ext::shader_object::NAME,
+
             // these are all required for shader_object
+            ext::shader_object::NAME,
             khr::dynamic_rendering::NAME,
             khr::depth_stencil_resolve::NAME,
             khr::create_renderpass2::NAME,
             khr::multiview::NAME,
             khr::maintenance2::NAME,
+
+            // required for descriptor_indexing
+            ext::descriptor_indexing::NAME,
+            khr::maintenance3::NAME,
         ];
 
         let required_device_extensions_set : HashSet<_> = required_device_extensions.into();
@@ -207,26 +214,69 @@ impl Renderer {
         ];
 
         let required_device_extensions = required_device_extensions.map(|x|x.as_ptr());
-        
 
+        let mut feature_descriptor_indexing = vk::PhysicalDeviceDescriptorIndexingFeaturesEXT::default()
+            .descriptor_binding_storage_buffer_update_after_bind(true);
         let mut feature_shader_object     = vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
         let mut feature_dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&required_device_extensions)
             .push_next(&mut feature_shader_object)
-            .push_next(&mut feature_dynamic_rendering);
+            .push_next(&mut feature_dynamic_rendering)
+            .push_next(&mut feature_descriptor_indexing);
         let device = unsafe{instance.create_device(gpu, &device_info, None)}.expect("unable to create vkdevice");
         let queue = unsafe{device.get_device_queue(fam_idx, 0)};
-
-        let khr_swapchain = khr::swapchain::Device::new(&instance, &device);
-        println!("device ready!");
-
-        //let present_modes = unsafe{khr_surface.get_physical_device_surface_present_modes(gpu, surface)}.unwrap();
-        let (swapchain, swapchain_images, swapchain_views, swapchain_extent) = Self::create_swapchain(&window, &gpu, &device, &khr_swapchain, &khr_surface, surface, surface_format);
-
         let khr_dynamic_rendering = khr::dynamic_rendering::Device::new(&instance, &device);
         let ext_shader_object     = ext::shader_object::Device::new(&instance, &device);
+        let khr_swapchain = khr::swapchain::Device::new(&instance, &device);
+        println!("device ready");
+
+        fn fmt_size(n:u64) -> String{
+            if n<1_000_000 {
+                format!("{:>3} B", n)
+            }else if n<1_000_000 {
+                format!("{:>3} kB", n>>10)
+            }else if n<1_000_000_000 {
+                format!("{:>3} MB", n>>20)
+            }else{
+                format!("{:>3} GB", n>>30)
+            }
+        }
+
+        // identify memories
+        let memory_properties = unsafe{ instance.get_physical_device_memory_properties(gpu) };
+        // for i in 0..memory_properties.memory_heap_count {
+        //     let heap = memory_properties.memory_heaps[i as usize];
+        //     let bar = if heap.size <= 256<<20 && heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL) { "<- likely BAR heap" } else {""};
+        //     println!("{i:>2}: {size} {flags:?} {bar}", flags=heap.flags, size=fmt_size(heap.size));
+        // }
+        let mut bar_memory_idx = None;
+        let mut gpu_memory_idx = None;
+        for (i,memtype) in memory_properties.memory_types_as_slice().iter().enumerate() {
+            let heap = memory_properties.memory_heaps[memtype.heap_index as usize];
+            let host_visible = memtype.property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT);
+            let device_local = heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL);
+            let mut select = "";
+            if host_visible && device_local {
+                let rebar = if heap.size<(256<<20) { select="BAR ->" } else { select="reBAR ->" };
+                if bar_memory_idx.is_none() { 
+                    bar_memory_idx = Some(i as u32);
+                };
+            } else if device_local {
+                if gpu_memory_idx.is_none() {
+                    gpu_memory_idx = Some(i as u32);
+                    select = "gpu ->";
+                };
+            } 
+            println!("{select:>8}{i:>2}:{heap} {size} {location:<4} {flags:?}", heap=memtype.heap_index, size=fmt_size(heap.size), location=if device_local {"gpu"} else {"host"}, flags=memtype.property_flags );
+        }
+        let Some(gpu_memory_idx) = gpu_memory_idx else {panic!("no device memory")};
+        println!("gpu: {gpu_memory_idx:?}");
+        println!("bar: {bar_memory_idx:?}");
+
+        let (swapchain, swapchain_images, swapchain_views, swapchain_extent) = Self::create_swapchain(&window, &gpu, &device, &khr_swapchain, &khr_surface, surface, surface_format);
+        println!("swapchain created");
 
         let command_pool_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
@@ -238,36 +288,62 @@ impl Renderer {
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         let [command_buffer] = unsafe{device.allocate_command_buffers(&alloc_info)}.unwrap()[..] else {panic!("got more buffers than expected")};
+        println!("command buffer created");
 
         let semaphore_info = vk::SemaphoreCreateInfo::default();
         let ready_to_submit = unsafe{device.create_semaphore(&semaphore_info, None)}.unwrap();
         let ready_to_present = unsafe{device.create_semaphore(&semaphore_info, None)}.unwrap();
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         let ready_to_record = unsafe{device.create_fence(&fence_info, None)}.unwrap();
-        
-        let push_constant_range = [vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::VERTEX)
-            .size(4*size_of::<f32>() as u32)];
-        let push_constant_info = vk::PipelineLayoutCreateInfo::default()
-            .push_constant_ranges(&push_constant_range);
-        let push_constant_layout = unsafe{ device.create_pipeline_layout(&push_constant_info, None) }.unwrap();
 
-        Self{ window, entry, instance, gpu, surface, device, queue, fam_idx, push_constant_range, push_constant_layout, surface_format, swapchain, swapchain_extent, swapchain_images, swapchain_views, command_pool, command_buffer, ready_to_submit, ready_to_present, ready_to_record, khr_display, khr_surface,  khr_swapchain, khr_dynamic_rendering, ext_shader_object }
+        let descriptor_pool_sizes = [
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
+        ];
+        let descriptor_pool_info = vk::DescriptorPoolCreateInfo::default()
+            .pool_sizes(&descriptor_pool_sizes)
+            .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND_EXT)
+            .max_sets(1);
+        let descriptor_pool = unsafe{device.create_descriptor_pool(&descriptor_pool_info, None)}.unwrap();
+
+
+
+        Self{ window, entry, instance, gpu, memory_properties, bar_memory_idx, gpu_memory_idx, surface, device, queue, fam_idx, descriptor_pool, surface_format, swapchain, swapchain_extent, swapchain_images, swapchain_views, command_pool, command_buffer, ready_to_submit, ready_to_present, ready_to_record, khr_display, khr_surface,  khr_swapchain, khr_dynamic_rendering, ext_shader_object }
     }
 
-    //pub fn map_memory(&self, size: u64) -> &[u8] {
-    //    let fam_idx = [self.fam_idx];
-    //    let buffer_info = vk::BufferCreateInfo::default()
-    //        .queue_family_indices(&fam_idx)
-    //        .size(size)
-    //        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-    //        .usage(vk::BufferUsageFlags::TRANSFER_SRC);
-    //    let buf = unsafe{self.device.create_buffer(&buffer_info, None)}.unwrap();
-    //    todo!()
-    //}
+    pub fn alloc_buffer(&self, size:u64,usage: vk::BufferUsageFlags, mem_idx:u32) -> (vk::Buffer,vk::DeviceMemory) {
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .usage(usage);
+        let buffer = unsafe{self.device.create_buffer(&buffer_info, None)}.expect("could not create buffer");
+        let req    = unsafe{self.device.get_buffer_memory_requirements(buffer)};
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(req.size)
+            .memory_type_index(mem_idx);
+        let memory = unsafe{ self.device.allocate_memory(&alloc_info, None) }.expect("could not alloc memory");
+        unsafe{ self.device.bind_buffer_memory(buffer, memory, 0); }
+        (buffer, memory)
+    }
 
-    pub fn load_shader_vs_fs<P:?Sized+AsRef<std::path::Path>>(&self,
-                             vs_spv_path: &P, fs_spv_path: &P) -> [ShaderEXT;2] {
-        let push_constants_ranges = [vk::PushConstantRange::default().size(2*size_of::<f32>() as u32)];
+    pub fn map_bar_buffer(&self, size:u64, usage: vk::BufferUsageFlags) -> Option<(vk::Buffer,*mut core::ffi::c_void)> {
+        let mem_idx = match self.bar_memory_idx {
+            None => return None,
+            Some(idx) => idx,
+        };
+        let (buffer, memory) = self.alloc_buffer(size, usage, mem_idx);
+
+        //let req = unsafe{self.device.get_buffer_memory_requirements(buf)};
+        let ptr = unsafe{ self.device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) }.expect("memory map failed");
+        //let ptr = core::ptr::slice_from_raw_parts_mut(unsafe{core::mem::transmute(ptr)}, size as usize);
+        Some((buffer,ptr))
+    }
+
+    pub fn load_shader_vs_fs<P:?Sized+AsRef<std::path::Path>> (&self, 
+            vs_spv_path: &P, 
+            fs_spv_path: &P, 
+            push_constant_ranges : &[vk::PushConstantRange],
+            descriptor_set_layout : &[vk::DescriptorSetLayout]) -> (ShaderEXT,ShaderEXT) {
+
         let vs = match std::fs::read(vs_spv_path) {
             Ok(vs) => vs,
             Err(e) => { panic!("\n{ERR_STR} could not read vertex shader\n{}\n{e}\n", pretty_print_path(vs_spv_path)) }
@@ -284,7 +360,8 @@ impl Renderer {
                 .code_type(vk::ShaderCodeTypeEXT::SPIRV)
                 .code(&vs)
                 .name(c"main")
-                .push_constant_ranges(&self.push_constant_range),
+                .push_constant_ranges(&push_constant_ranges)
+                .set_layouts(&descriptor_set_layout),
             vk::ShaderCreateInfoEXT::default()
                 .flags(vk::ShaderCreateFlagsEXT::LINK_STAGE)
                 .stage(vk::ShaderStageFlags::FRAGMENT)
@@ -292,10 +369,11 @@ impl Renderer {
                 .code_type(vk::ShaderCodeTypeEXT::SPIRV)
                 .code(&fs)
                 .name(c"main")
-                .push_constant_ranges(&self.push_constant_range),
+                .push_constant_ranges(&push_constant_ranges)
+                .set_layouts(&descriptor_set_layout),
         ];
         match unsafe{ self.ext_shader_object.create_shaders(&shader_infos, None) } {
-            Ok(ret) => [ret[0], ret[1]],
+            Ok(ret) => (ret[0], ret[1]),
             Err((ret,err)) => {
                 let vs = ret[0];
                 let fs = ret[1];
@@ -517,9 +595,14 @@ impl<'a> Frame<'a> {
         // TODO: match this with the exact rules when things should be defined
     }
 
-    pub fn draw(&mut self, vertex_count:u32, instance_count:u32, first_vertex:u32, first_instance:u32){
+    pub fn draw(&mut self, vertex_count:u32, first_vertex:u32){
         self.apply_unset_defaults();
-        unsafe{self.renderer.device.cmd_draw(self.renderer.command_buffer, 3, 1, 0, 0)};
+        unsafe{self.renderer.device.cmd_draw(self.renderer.command_buffer, vertex_count, 1, first_vertex, 0)};
+    }
+
+    pub fn draw_indexed(&mut self, index_count:u32, first_index:u32, vertex_offset:i32){
+        self.apply_unset_defaults();
+        unsafe{self.renderer.device.cmd_draw_indexed(self.renderer.command_buffer, index_count, 1, first_index, vertex_offset, 0)};
     }
 
     pub fn bind_vs_fs(&self, vs: ShaderEXT, fs: ShaderEXT){
@@ -528,11 +611,56 @@ impl<'a> Frame<'a> {
         unsafe{self.renderer.ext_shader_object.cmd_bind_shaders(self.renderer.command_buffer, &stages, &shaders)};
     }
 
-    pub fn push_constant<T>(&self, data:&T){
+    pub fn set_vertex_input(&self, vertex_stride:u32, offsets:&[(u32,vk::Format)]){
+        let binding = [vk::VertexInputBindingDescription2EXT::default()
+            .binding(0)
+            .stride(vertex_stride)
+            .input_rate(vk::VertexInputRate::VERTEX)
+            .divisor(1) ];
+        let attribute : Vec<_> = offsets.into_iter().enumerate().map(|(i,(off,fmt))|
+            vk::VertexInputAttributeDescription2EXT::default()
+            .location(i as u32)
+            .binding(0)
+            .format(*fmt)
+            .offset(*off) ).collect();
+        unsafe{self.renderer.ext_shader_object.cmd_set_vertex_input(self.renderer.command_buffer,
+            &binding, &attribute)};
+    }
+
+    pub fn bind_index_buffer(&self, buffer: vk::Buffer, offset:u64){
+        unsafe{self.renderer.device.cmd_bind_index_buffer(self.renderer.command_buffer, buffer, offset, vk::IndexType::UINT16)};
+    }
+
+    pub fn bind_vertex_buffer(&self, buffer: vk::Buffer){
+        let buffers = [buffer];
+        let offsets = [0];
+        //let sizes   = [sizes*strides];
+        //let strides = [strides];
+        unsafe{self.renderer.device.cmd_bind_vertex_buffers(self.renderer.command_buffer, 0, &buffers, &offsets)};//, Some(&sizes), Some(&strides))};
+    }
+
+    pub fn bind_descriptor_set(&self, descriptor_set:vk::DescriptorSet, pipeline_layout:vk::PipelineLayout){
+        let descriptor_set = [descriptor_set];
+        println!("before bind descriptor set");
+        unsafe{self.renderer.device.cmd_bind_descriptor_sets(
+            self.renderer.command_buffer, vk::PipelineBindPoint::GRAPHICS,
+            pipeline_layout,
+            0,
+            &descriptor_set,
+            &[])};
+        println!("after descriptor set");
+    }
+
+    pub fn push_constant<T>(&self, pipeline_layout: vk::PipelineLayout, data:&T){
         let ptr = core::ptr::from_ref(data);
         let byte_ptr = unsafe{core::mem::transmute::<*const T,*const u8>(ptr)};
         let bytes = unsafe{core::slice::from_raw_parts(byte_ptr, size_of::<T>())};
-        unsafe{self.renderer.device.cmd_push_constants(self.renderer.command_buffer, self.renderer.push_constant_layout, vk::ShaderStageFlags::VERTEX, 0, bytes)};
+        println!("before push_constants");
+        unsafe{self.renderer.device.cmd_push_constants(
+            self.renderer.command_buffer,
+            pipeline_layout,
+            vk::ShaderStageFlags::VERTEX, 0, bytes)};
+        println!("after push_constants");
     }
 }
 

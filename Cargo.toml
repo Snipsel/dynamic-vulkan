@@ -10,12 +10,6 @@ panic="abort"
 panic="abort"
 strip="symbols"
 
-[profile.test]
-panic="abort"
-
-[profile.bench]
-panic="abort"
-
 [dependencies]
 # harfbuzz    = {version="0.6", features=["freetype", "bundled"]}
 # freetype-rs = "0.36"
