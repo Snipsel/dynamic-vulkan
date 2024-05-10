@@ -297,11 +297,11 @@ impl Renderer {
         let ready_to_record = unsafe{device.create_fence(&fence_info, None)}.unwrap();
 
         let descriptor_pool_sizes = [
-            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1),
         ];
         let descriptor_pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&descriptor_pool_sizes)
-            .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND_EXT)
+            //.flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND_EXT)
             .max_sets(1);
         let descriptor_pool = unsafe{device.create_descriptor_pool(&descriptor_pool_info, None)}.unwrap();
 
@@ -388,7 +388,7 @@ impl Renderer {
         }
     }
 
-    pub fn new_frame(&mut self) -> Frame { Frame::new(self) }
+    pub fn wait_for_frame(&mut self) -> Frame { Frame::new(self) }
 
     pub fn debug_print(&self){
         let properties = unsafe{self.instance.get_physical_device_properties(self.gpu)};
@@ -453,19 +453,20 @@ impl<'a> Frame<'a> {
         let begin_info = vk::CommandBufferBeginInfo::default();
         unsafe{renderer.device.begin_command_buffer(renderer.command_buffer, &begin_info)}.unwrap();
 
-        // transition image from present-optimal to render-optimal
+        // transition swapchain image from present-optimal to render-optimal
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
         let image_memory_barriers = [
             vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .image(renderer.swapchain_images[swap_idx as usize])
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .image(renderer.swapchain_images[swap_idx as usize])
-                .subresource_range(vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1))
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .subresource_range(range),
         ];
         unsafe{renderer.device.cmd_pipeline_barrier(renderer.command_buffer,
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, // (changed from TOP_OF_PIPE)
@@ -473,7 +474,57 @@ impl<'a> Frame<'a> {
             vk::DependencyFlags::empty(),
             &[], &[], &image_memory_barriers)};
 
+        let dynamic_state_flags = DynamicStateFlags::empty();
+        Self{ renderer, swap_idx, dynamic_state_flags}
+    }
 
+    pub fn buffer_to_image(&self, buffer: vk::Buffer, image: vk::Image, regions: &[vk::BufferImageCopy]){
+        if regions.len() == 0 { return; }
+        let subrange = vk::ImageSubresourceRange{ aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level:0, level_count:1, base_array_layer:0, layer_count:1 };
+        let to_write_optimal = [vk::ImageMemoryBarrier::default()
+            .image(image)
+            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::NONE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .subresource_range(subrange)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        ];
+        unsafe{self.renderer.device.cmd_pipeline_barrier(
+            self.renderer.command_buffer,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::BY_REGION,
+            &[], &[], &to_write_optimal)};
+
+        unsafe{self.renderer.device.cmd_copy_buffer_to_image(self.renderer.command_buffer,
+            buffer,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            regions)};
+
+        let to_display_optimal = [vk::ImageMemoryBarrier::default()
+            .image(image)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::NONE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .subresource_range(subrange)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        ];
+        unsafe{self.renderer.device.cmd_pipeline_barrier(
+            self.renderer.command_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::BY_REGION,
+            &[], &[], &to_display_optimal)};
+    }
+
+
+    pub fn begin_rendering(&self) {
         // begin rendering
         let mut clear_color_value = vk::ClearColorValue::default();
         clear_color_value.float32 = [0.0, 0.5, 0.5, 1.0];
@@ -481,7 +532,7 @@ impl<'a> Frame<'a> {
         clear_color.color = clear_color_value;
         let color_attachments = [
             vk::RenderingAttachmentInfo::default()
-                .image_view(renderer.swapchain_views[swap_idx as usize])
+                .image_view(self.renderer.swapchain_views[self.swap_idx as usize])
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .resolve_image_layout(vk::ImageLayout::PRESENT_SRC_KHR)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -489,14 +540,10 @@ impl<'a> Frame<'a> {
                 .clear_value(clear_color),
         ];
         let rendering_info = vk::RenderingInfo::default()
-            .render_area(renderer.swapchain_extent.into())
+            .render_area(self.renderer.swapchain_extent.into())
             .layer_count(1)
             .color_attachments(&color_attachments);
-        unsafe{renderer.khr_dynamic_rendering.cmd_begin_rendering(renderer.command_buffer, &rendering_info)};
-
-        let dynamic_state_flags = DynamicStateFlags::empty();
-
-        Self{ renderer, swap_idx, dynamic_state_flags}
+        unsafe{self.renderer.khr_dynamic_rendering.cmd_begin_rendering(self.renderer.command_buffer, &rendering_info)};
     }
 
     pub fn set_viewports(&mut self, viewports : &[vk::Viewport]){
@@ -634,33 +681,27 @@ impl<'a> Frame<'a> {
     pub fn bind_vertex_buffer(&self, buffer: vk::Buffer){
         let buffers = [buffer];
         let offsets = [0];
-        //let sizes   = [sizes*strides];
-        //let strides = [strides];
         unsafe{self.renderer.device.cmd_bind_vertex_buffers(self.renderer.command_buffer, 0, &buffers, &offsets)};//, Some(&sizes), Some(&strides))};
     }
 
     pub fn bind_descriptor_set(&self, descriptor_set:vk::DescriptorSet, pipeline_layout:vk::PipelineLayout){
         let descriptor_set = [descriptor_set];
-        println!("before bind descriptor set");
         unsafe{self.renderer.device.cmd_bind_descriptor_sets(
             self.renderer.command_buffer, vk::PipelineBindPoint::GRAPHICS,
             pipeline_layout,
             0,
             &descriptor_set,
             &[])};
-        println!("after descriptor set");
     }
 
     pub fn push_constant<T>(&self, pipeline_layout: vk::PipelineLayout, data:&T){
         let ptr = core::ptr::from_ref(data);
         let byte_ptr = unsafe{core::mem::transmute::<*const T,*const u8>(ptr)};
         let bytes = unsafe{core::slice::from_raw_parts(byte_ptr, size_of::<T>())};
-        println!("before push_constants");
         unsafe{self.renderer.device.cmd_push_constants(
             self.renderer.command_buffer,
             pipeline_layout,
             vk::ShaderStageFlags::VERTEX, 0, bytes)};
-        println!("after push_constants");
     }
 }
 
