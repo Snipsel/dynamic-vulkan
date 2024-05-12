@@ -1,11 +1,10 @@
 #![allow(unused)]
 mod renderer;
 
-//use harfbuzz as hb;
-//use freetype as ft;
 use std::{
     collections::HashSet, ffi::{CStr,OsStr}, fmt, mem::size_of, ptr
 };
+use freetype as ft;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -17,21 +16,6 @@ use ash::{
      ext, khr, vk::{self, CommandBuffer, CommandPool, Fence, Handle, Image, ImageView, InstanceCreateInfo, PhysicalDevice, Queue, Semaphore, ShaderEXT, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, WriteDescriptorSet}, Device, Entry, Instance
 };
 use bitflags::bitflags;
-
-#[derive(Default)]
-enum App{
-    #[default] Uninitialized,
-    Resumed{
-        renderer: renderer::Renderer,
-        vs : ShaderEXT,
-        fs : ShaderEXT,
-        bar_buffer : vk::Buffer,
-        bar_memory : *mut core::ffi::c_void,
-        pipeline_layout : vk::PipelineLayout,
-        descriptor_set : vk::DescriptorSet,
-        image : vk::Image
-    },
-}
 
 // render strategy
 // - single queue
@@ -63,6 +47,7 @@ fn end_oneshot_cmd(renderer: &renderer::Renderer, cmdbuf : vk::CommandBuffer){
     unsafe{renderer.device.free_command_buffers(renderer.command_pool, &cmdbuf)};
 }
 
+// TODO: think about colors. Right now Color means sRGBA8
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct Color{
@@ -98,9 +83,9 @@ fn gen_quad(pos:(u16,u16), size:(u16,u16), texcoords:(u16,u16), color: Color) ->
     let (u,v) = texcoords;
     [
         Vertex{x:x+0,  y:y+0, u:u+0, v:v+0, color}, // top left
-        Vertex{x:x+0,  y:y+h, u:u+0, v:v+4, color}, // bottom left
-        Vertex{x:x+w,  y:y+0, u:u+4, v:v+0, color}, // top right
-        Vertex{x:x+w,  y:y+h, u:u+4, v:v+4, color}, // bottom right
+        Vertex{x:x+0,  y:y+h, u:u+0, v:v+h, color}, // bottom left
+        Vertex{x:x+w,  y:y+0, u:u+w, v:v+0, color}, // top right
+        Vertex{x:x+w,  y:y+h, u:u+w, v:v+h, color}, // bottom right
     ]
 }
 
@@ -120,11 +105,52 @@ fn push_quad_indices(ptr:*mut core::ffi::c_void, i:u16) -> *mut core::ffi::c_voi
     unsafe{push_type::<[u16;6]>(ptr, indices)}
 }
 
+fn push_char(ptr:*mut core::ffi::c_void, face: &ft::Face, size:isize, ch:char) -> (*mut core::ffi::c_void,vk::Extent2D,u32) {
+    face.set_char_size(0, size*64, 0, 0).unwrap();
+    face.load_char(ch as usize, ft::face::LoadFlag::RENDER|ft::face::LoadFlag::FORCE_AUTOHINT).unwrap();
+    let glyph = face.glyph();
+    let bitmap = glyph.bitmap();
+    let extent = vk::Extent2D{
+        width:  bitmap.width() as u32,
+        height: bitmap.rows()  as u32,
+    };
+    let pitch  = bitmap.pitch() as u32;
+    let buffer = bitmap.buffer();
+
+    // inefficient. how to volatile memcpy?
+    let u8_ptr : *mut u8 = unsafe{core::mem::transmute(ptr)};
+    for (i,b) in buffer.into_iter().enumerate() {
+        unsafe{u8_ptr.add(i).write_volatile(*b);}
+    }
+    // unstable: unsafe{core::intrinsics::volatile_copy_memory(u8_ptr, buffer.as_ptr(), buffer.len())};
+
+    (unsafe{ptr.byte_add(buffer.len())}, extent, pitch)
+}
+
+#[derive(Default)]
+enum App{
+    #[default] Uninitialized,
+    Resumed{
+        renderer: renderer::Renderer,
+        vs : ShaderEXT,
+        fs : ShaderEXT,
+        bar_buffer : vk::Buffer,
+        bar_memory : *mut core::ffi::c_void,
+        pipeline_layout : vk::PipelineLayout,
+        descriptor_set : vk::DescriptorSet,
+        image : vk::Image,
+        //freetype_lib  : ft::Library,
+        face : ft::Face
+    },
+}
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         match self {
             App::Resumed{..}    => todo!("handle re-resuming"),
             App::Uninitialized => {
+                let freetype_lib  = ft::Library::init().expect("failed to initialize freetype");
+                let face = freetype_lib.new_face("./source-sans/SourceSans3-Regular.ttf", 0).expect("could not find font");
+
                 let init_start = std::time::Instant::now();
                 let renderer = renderer::Renderer::new(event_loop);
                 let init_render = std::time::Instant::now();
@@ -260,7 +286,7 @@ impl ApplicationHandler for App {
                 println!("{:>13?} renderer new", init_render-init_start);
                 println!("{:>13?} post renderer", init_end-init_render);
                 println!("{:>13?} total init", init_end-init_start);
-                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image};
+                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, face};
             },
         }
     }
@@ -272,7 +298,7 @@ impl ApplicationHandler for App {
                 event_loop.exit()
             },
             WindowEvent::RedrawRequested => {
-                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image} = self else { panic!("not active!") };
+                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, face} = self else { panic!("not active!") };
                 println!("================================================================================");
                 let winsize = renderer.window.inner_size();
                 let win_w = winsize.width as f32;
@@ -281,33 +307,52 @@ impl ApplicationHandler for App {
 
                 let mut frame = renderer.wait_for_frame();
 
-                let quad = gen_quad((10,10), (256,256), (0,0), Color::WHITE);
-                for vert in &quad {
-                    println!("  vert: {vert:?}");
-                }
-
                 let verts_start = *bar_memory;
-                let index_start = push_quad_verts(verts_start, quad);
-                let image_start = push_quad_indices(index_start, 0);
-                let bar_end = unsafe{push_type::<[u8;4*4]>(image_start,[
-                    0x88, 0x88, 0xAA, 0xAA,
-                    0x88, 0x40, 0x40, 0xAA,
-                    0x00, 0x40, 0x40, 0xFF,
-                    0x00, 0x00, 0xFF, 0xFF,
-                ])};
+                let index_start = push_quad_verts(verts_start, gen_quad((10,10), (256,256), (0,0), Color::WHITE));
+                let image_1 = push_quad_indices(index_start, 0);
 
-                //let vertex_count = 4 as u32;
-                //let vertex_size  = size_of::<Vertex>() as u32;
-                let image_offset = unsafe{image_start.byte_offset_from(*bar_memory)} as u64;
-                let index_offset = unsafe{index_start.byte_offset_from(*bar_memory)} as u64;
+                let (image_2, img_size_1, img_pitch_1) = push_char(image_1, face, 24, 'A');
+                let (image_3, img_size_2, img_pitch_2) = push_char(image_2, face, 24, 'B');
+                let (bar_end, img_size_3, img_pitch_3) = push_char(image_3, face, 24, 'C');
+
+                let index_buffer_offset = unsafe{index_start.byte_offset_from(*bar_memory)} as u64;
+                let image_buffer_offset_1 = unsafe{image_1.byte_offset_from(*bar_memory)} as u64;
+                let image_buffer_offset_2 = unsafe{image_2.byte_offset_from(*bar_memory)} as u64;
+                let image_buffer_offset_3 = unsafe{image_3.byte_offset_from(*bar_memory)} as u64;
 
                 frame.buffer_to_image(*bar_buffer, *image, &[
                     vk::BufferImageCopy{
-                        buffer_offset: image_offset,
-                        buffer_row_length: 0,
+                        buffer_offset: image_buffer_offset_1,
+                        buffer_row_length: img_pitch_1,
                         buffer_image_height: 0,
                         image_offset: vk::Offset3D{x:0,y:0,z:0},
-                        image_extent: vk::Extent3D{width:4,height:4,depth:1},
+                        image_extent: img_size_1.into(),
+                        image_subresource: vk::ImageSubresourceLayers{
+                            layer_count: 1,
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_array_layer: 0,
+                            mip_level: 0
+                        }
+                    },
+                    vk::BufferImageCopy{
+                        buffer_offset: image_buffer_offset_2,
+                        buffer_row_length: img_pitch_2,
+                        buffer_image_height: 0,
+                        image_offset: vk::Offset3D{x:25,y:0,z:0},
+                        image_extent: img_size_2.into(),
+                        image_subresource: vk::ImageSubresourceLayers{
+                            layer_count: 1,
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_array_layer: 0,
+                            mip_level: 0
+                        }
+                    },
+                    vk::BufferImageCopy{
+                        buffer_offset: image_buffer_offset_3,
+                        buffer_row_length: img_pitch_3,
+                        buffer_image_height: 0,
+                        image_offset: vk::Offset3D{x:50,y:0,z:0},
+                        image_extent: img_size_3.into(),
                         image_subresource: vk::ImageSubresourceLayers{
                             layer_count: 1,
                             aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -320,7 +365,7 @@ impl ApplicationHandler for App {
                 frame.begin_rendering();
                 frame.bind_vs_fs(*vs, *fs);
                 frame.bind_vertex_buffer(*bar_buffer);
-                frame.bind_index_buffer(*bar_buffer, index_offset);
+                frame.bind_index_buffer(*bar_buffer, index_buffer_offset);
                 frame.set_vertex_input(core::mem::size_of::<Vertex>() as u32, &[
                     (0, vk::Format::R16G16_UINT),
                     (4, vk::Format::R16G16_UINT),
@@ -347,14 +392,6 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    //let mut buf = hb::Buffer::with("Hello World!");
-    //buf.set_direction(hb::Direction::LTR);
-    //buf.set_script(hb::sys::HB_SCRIPT_LATIN);
-    //let lib = ft::Library::init().expect("failed to initialize freetype");
-    //let face = lib.new_face("./source-sans/SourceSans3-Regular.ttf", 0).expect("could not find font");
-
-
-
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Wait);
 

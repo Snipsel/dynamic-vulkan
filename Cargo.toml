@@ -11,8 +11,7 @@ panic="abort"
 strip="symbols"
 
 [dependencies]
-# harfbuzz    = {version="0.6", features=["freetype", "bundled"]}
-# freetype-rs = "0.36"
+freetype-rs = "0.36"
 shaderc     = {version="0.8", optional = false} # in future: optional dependency
 winit       = "0.30"
 ash         = "0.38"
