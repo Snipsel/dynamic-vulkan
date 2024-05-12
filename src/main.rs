@@ -190,7 +190,7 @@ impl ApplicationHandler for App {
                 let pipeline_layout = unsafe{ renderer.device.create_pipeline_layout(&pipeline_layout_info, None) }.unwrap();
                 println!("pipeline layout: {pipeline_layout:?}");
 
-                let (vs,fs) = renderer.load_shader_vs_fs("in_triangle.vert.spv", "image_triangle.frag.spv", &push_constant_ranges, &set_layouts);
+                let (vs,fs) = renderer.load_glsl_vs_fs("shaders/text-renderer.vert.glsl", "shaders/text-renderer.frag.glsl", &push_constant_ranges, &set_layouts);
                 let Some((bar_buffer, bar_memory)) = renderer.map_bar_buffer(128<<20,
                     vk::BufferUsageFlags::VERTEX_BUFFER
                   | vk::BufferUsageFlags::INDEX_BUFFER
@@ -308,11 +308,14 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
+
     //let mut buf = hb::Buffer::with("Hello World!");
     //buf.set_direction(hb::Direction::LTR);
     //buf.set_script(hb::sys::HB_SCRIPT_LATIN);
     //let lib = ft::Library::init().expect("failed to initialize freetype");
     //let face = lib.new_face("./source-sans/SourceSans3-Regular.ttf", 0).expect("could not find font");
+
+
 
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Wait);

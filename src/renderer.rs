@@ -58,6 +58,7 @@ pub struct Renderer{
 }
 
 impl Renderer {
+    // TODO: remove dependencie on winit, use raw window/display handles instead
     fn platform_specific_init(entry: &Entry, window: &Window, mut extensions: Vec<&CStr>) -> (Instance, SurfaceKHR) {
         use winit::raw_window_handle::RawWindowHandle  as raw_win;
         use winit::raw_window_handle::RawDisplayHandle as raw_dpy;
@@ -338,27 +339,57 @@ impl Renderer {
         Some((buffer,ptr))
     }
 
-    pub fn load_shader_vs_fs<P:?Sized+AsRef<std::path::Path>> (&self, 
-            vs_spv_path: &P, 
-            fs_spv_path: &P, 
+    // TODO: #[cfg(feature="glslc")]
+    pub fn load_glsl_vs_fs<P:?Sized+AsRef<std::path::Path>> (&self,
+            vs_glsl_path: &P, 
+            fs_glsl_path: &P, 
+            push_constant_ranges : &[vk::PushConstantRange],
+            descriptor_set_layout : &[vk::DescriptorSetLayout]) -> (ShaderEXT,ShaderEXT) {
+        use shaderc;
+        let mut compiler = shaderc::Compiler::new().unwrap();
+        let mut options  = shaderc::CompileOptions::new().unwrap();
+
+        let vert_src = std::fs::read_to_string(vs_glsl_path).expect("could not read vertex shader");
+        let vert = compiler.compile_into_spirv(
+            &vert_src, 
+            shaderc::ShaderKind::Vertex,
+            &vs_glsl_path.as_ref().to_string_lossy(),
+            "main",
+            Some(&options)
+        ).expect("vert shader failed to compile");
+
+        let frag_src = std::fs::read_to_string(fs_glsl_path).expect("could not read fragment shader");
+        let frag = compiler.compile_into_spirv(
+            &frag_src, 
+            shaderc::ShaderKind::Fragment,
+            &fs_glsl_path.as_ref().to_string_lossy(),
+            "main",
+            Some(&options)
+        ).expect("vert shader failed to compile");
+        self.load_spirv_vs_fs(vert.as_binary_u8(), frag.as_binary_u8(), push_constant_ranges, descriptor_set_layout)
+    }
+
+    pub fn load_spirv_vs_fs (&self, 
+            vs_spv : &[u8],
+            fs_spv : &[u8],
             push_constant_ranges : &[vk::PushConstantRange],
             descriptor_set_layout : &[vk::DescriptorSetLayout]) -> (ShaderEXT,ShaderEXT) {
 
-        let vs = match std::fs::read(vs_spv_path) {
-            Ok(vs) => vs,
-            Err(e) => { panic!("\n{ERR_STR} could not read vertex shader\n{}\n{e}\n", pretty_print_path(vs_spv_path)) }
-        };
-        let fs = match std::fs::read(fs_spv_path) {
-            Ok(fs) => fs,
-            Err(e) => { panic!("\n{ERR_STR} could not read fragment shader\n{}\n{e}\n", pretty_print_path(fs_spv_path)) }
-        };
+        //let vs = match std::fs::read(vs_spv_path) {
+        //    Ok(vs) => vs,
+        //    Err(e) => { panic!("\n{ERR_STR} could not read vertex shader\n{}\n{e}\n", pretty_print_path(vs_spv_path)) }
+        //};
+        //let fs = match std::fs::read(fs_spv_path) {
+        //    Ok(fs) => fs,
+        //    Err(e) => { panic!("\n{ERR_STR} could not read fragment shader\n{}\n{e}\n", pretty_print_path(fs_spv_path)) }
+        //};
         let shader_infos = [
             vk::ShaderCreateInfoEXT::default()
                 .flags(vk::ShaderCreateFlagsEXT::LINK_STAGE)
                 .stage(vk::ShaderStageFlags::VERTEX)
                 .next_stage(vk::ShaderStageFlags::FRAGMENT)
                 .code_type(vk::ShaderCodeTypeEXT::SPIRV)
-                .code(&vs)
+                .code(vs_spv)
                 .name(c"main")
                 .push_constant_ranges(&push_constant_ranges)
                 .set_layouts(&descriptor_set_layout),
@@ -367,7 +398,7 @@ impl Renderer {
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .next_stage(vk::ShaderStageFlags::empty())
                 .code_type(vk::ShaderCodeTypeEXT::SPIRV)
-                .code(&fs)
+                .code(fs_spv)
                 .name(c"main")
                 .push_constant_ranges(&push_constant_ranges)
                 .set_layouts(&descriptor_set_layout),
