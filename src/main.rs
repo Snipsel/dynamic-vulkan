@@ -63,6 +63,63 @@ fn end_oneshot_cmd(renderer: &renderer::Renderer, cmdbuf : vk::CommandBuffer){
     unsafe{renderer.device.free_command_buffers(renderer.command_pool, &cmdbuf)};
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct Color{
+    r:u8, g:u8, b:u8, a:u8
+}
+impl Color{
+    const CLEAR:Color = Color{r:0x00, g:0x00, b:0x00, a:0x00};
+    const WHITE:Color = Color{r:0xFF, g:0xFF, b:0xFF, a:0xFF};
+    const BLACK:Color = Color{r:0x00, g:0x00, b:0x00, a:0xFF};
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct Vertex{
+    x:u16, y:u16,
+    u:u16, v:u16,
+    color: Color
+}
+
+fn gen_quad_rect2d(rect:vk::Rect2D, texcoords:vk::Offset2D, color: Color) -> [Vertex;4] {
+    let x :u16 = rect.offset.x.try_into().unwrap();
+    let y :u16 = rect.offset.y.try_into().unwrap();
+    let w :u16 = rect.extent.width.try_into().unwrap();
+    let h :u16 = rect.extent.height.try_into().unwrap();
+    let u :u16 = texcoords.x.try_into().unwrap();
+    let v :u16 = texcoords.y.try_into().unwrap();
+    gen_quad((x,y), (w,h), (u,v), color)
+}
+
+fn gen_quad(pos:(u16,u16), size:(u16,u16), texcoords:(u16,u16), color: Color) -> [Vertex;4] {
+    let (x,y) = pos;
+    let (w,h) = size;
+    let (u,v) = texcoords;
+    [
+        Vertex{x:x+0,  y:y+0, u:u+0, v:v+0, color}, // top left
+        Vertex{x:x+0,  y:y+h, u:u+0, v:v+4, color}, // bottom left
+        Vertex{x:x+w,  y:y+0, u:u+4, v:v+0, color}, // top right
+        Vertex{x:x+w,  y:y+h, u:u+4, v:v+4, color}, // bottom right
+    ]
+}
+
+unsafe fn push_type<T>(ptr:*mut core::ffi::c_void, object:T) -> *mut core::ffi::c_void {
+    let vertex_memory = unsafe{core::mem::transmute::<*mut core::ffi::c_void, *mut T>(ptr)};
+    unsafe{core::ptr::write_volatile(vertex_memory, object)};
+    let t_size = std::mem::size_of::<T>() as isize;
+    unsafe{ptr.byte_offset(t_size)}
+}
+
+fn push_quad_verts(ptr:*mut core::ffi::c_void, verts: [Vertex;4]) -> *mut core::ffi::c_void {
+    unsafe{push_type::<[Vertex;4]>(ptr, verts)}
+}
+
+fn push_quad_indices(ptr:*mut core::ffi::c_void, i:u16) -> *mut core::ffi::c_void {
+    let indices = [ i+0, i+1, i+2, i+2, i+1, i+3 ];
+    unsafe{push_type::<[u16;6]>(ptr, indices)}
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         match self {
@@ -221,49 +278,32 @@ impl ApplicationHandler for App {
                 let win_w = winsize.width as f32;
                 let win_h = winsize.height as f32;
 
-                #[repr(packed)]
-                struct Vertex{
-                    x:u16, y:u16,
-                    u:u16, v:u16,
-                    r:u8, g:u8, b:u8, a:u8
-                }
 
                 let mut frame = renderer.wait_for_frame();
 
-                let vertex_memory = unsafe{core::mem::transmute::<*mut core::ffi::c_void, *mut _>(*bar_memory)};
-                unsafe{core::ptr::write_volatile(vertex_memory, [
-                    // top left
-                    Vertex{x:10,   y:10,  u:0, v:0, r:0xFF, g:0x00, b:0x00, a:0xFF},
+                let quad = gen_quad((10,10), (256,256), (0,0), Color::WHITE);
+                for vert in &quad {
+                    println!("  vert: {vert:?}");
+                }
 
-                    // bottom left
-                    Vertex{x:10,   y:265, u:0, v:4, r:0x00, g:0xFF, b:0x00, a:0xFF},
-
-                    // top right
-                    Vertex{x:265,  y:10,  u:4, v:0, r:0xFF, g:0xFF, b:0x00, a:0xFF},
-
-                    // bottom right
-                    Vertex{x:265,  y:265, u:4, v:4, r:0x00, g:0x00, b:0xFF, a:0xFF},
-                ])};
-
-                let vertex_count = 4 as u32;
-                let vertex_size  = size_of::<Vertex>() as u32;
-
-                let idx_memory = unsafe{core::mem::transmute::<*mut core::ffi::c_void, *mut [u16;6]>((*bar_memory).byte_offset((vertex_count*vertex_size) as isize))};
-                unsafe{core::ptr::write_volatile(idx_memory, [
-                    0, 1, 2,
-                    2, 1, 3,
-                ])};
-
-                let image_memory = unsafe{core::mem::transmute::<*mut core::ffi::c_void, *mut [u8;16]>((*bar_memory).byte_offset((vertex_count*vertex_size+6*2) as isize))};
-                unsafe{core::ptr::write_volatile(image_memory, [
-                    0x88, 0x88, 0xFF, 0xFF,
-                    0x88, 0x88, 0xFF, 0xFF,
-                    0x00, 0x00, 0xFF, 0xFF,
+                let verts_start = *bar_memory;
+                let index_start = push_quad_verts(verts_start, quad);
+                let image_start = push_quad_indices(index_start, 0);
+                let bar_end = unsafe{push_type::<[u8;4*4]>(image_start,[
+                    0x88, 0x88, 0xAA, 0xAA,
+                    0x88, 0x40, 0x40, 0xAA,
+                    0x00, 0x40, 0x40, 0xFF,
                     0x00, 0x00, 0xFF, 0xFF,
                 ])};
+
+                //let vertex_count = 4 as u32;
+                //let vertex_size  = size_of::<Vertex>() as u32;
+                let image_offset = unsafe{image_start.byte_offset_from(*bar_memory)} as u64;
+                let index_offset = unsafe{index_start.byte_offset_from(*bar_memory)} as u64;
+
                 frame.buffer_to_image(*bar_buffer, *image, &[
                     vk::BufferImageCopy{
-                        buffer_offset: (vertex_count*vertex_size+6*2) as u64,
+                        buffer_offset: image_offset,
                         buffer_row_length: 0,
                         buffer_image_height: 0,
                         image_offset: vk::Offset3D{x:0,y:0,z:0},
@@ -280,7 +320,7 @@ impl ApplicationHandler for App {
                 frame.begin_rendering();
                 frame.bind_vs_fs(*vs, *fs);
                 frame.bind_vertex_buffer(*bar_buffer);
-                frame.bind_index_buffer(*bar_buffer, 4*12);
+                frame.bind_index_buffer(*bar_buffer, index_offset);
                 frame.set_vertex_input(core::mem::size_of::<Vertex>() as u32, &[
                     (0, vk::Format::R16G16_UINT),
                     (4, vk::Format::R16G16_UINT),
@@ -299,7 +339,6 @@ impl ApplicationHandler for App {
                 ]);
                 frame.bind_descriptor_set(*descriptor_set, *pipeline_layout);
                 frame.push_constant(*pipeline_layout, &[2.0/win_w, 2.0/win_h, win_w/2.0, win_h/2.0]);
-                //frame.draw(6,0);
                 frame.draw_indexed(6, 0, 0);
             },
             _ => (),
@@ -308,7 +347,6 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-
     //let mut buf = hb::Buffer::with("Hello World!");
     //buf.set_direction(hb::Direction::LTR);
     //buf.set_script(hb::sys::HB_SCRIPT_LATIN);
