@@ -5,6 +5,8 @@ use std::{
     collections::HashSet, ffi::{CStr,OsStr}, fmt, mem::size_of, ptr
 };
 use freetype as ft;
+use harfbuzz_sys as hb;
+use hb::hb_language_t;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -48,6 +50,7 @@ fn end_oneshot_cmd(renderer: &renderer::Renderer, cmdbuf : vk::CommandBuffer){
 }
 
 // TODO: think about colors. Right now Color means sRGBA8
+// maybe have oklab colors internally and use .srgba8() to convert
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct Color{
@@ -62,11 +65,12 @@ impl Color{
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct Vertex{
-    x:u16, y:u16,
+    x:i16, y:i16,
     u:u16, v:u16,
     color: Color
 }
 
+/*
 fn gen_quad_rect2d(rect:vk::Rect2D, texcoords:vk::Offset2D, color: Color) -> [Vertex;4] {
     let x :u16 = rect.offset.x.try_into().unwrap();
     let y :u16 = rect.offset.y.try_into().unwrap();
@@ -74,18 +78,27 @@ fn gen_quad_rect2d(rect:vk::Rect2D, texcoords:vk::Offset2D, color: Color) -> [Ve
     let h :u16 = rect.extent.height.try_into().unwrap();
     let u :u16 = texcoords.x.try_into().unwrap();
     let v :u16 = texcoords.y.try_into().unwrap();
-    gen_quad((x,y), (w,h), (u,v), color)
+    gen_quad(x, y, w, h, u, v, color)
 }
 
-fn gen_quad(pos:(u16,u16), size:(u16,u16), texcoords:(u16,u16), color: Color) -> [Vertex;4] {
+fn gen_quad_pairs(pos:(i16,i16), size:(u16,u16), texcoords:(u16,u16), color: Color) -> [Vertex;4] {
     let (x,y) = pos;
     let (w,h) = size;
     let (u,v) = texcoords;
+    gen_quad(x,y,w,h,u,v,color)
+}
+*/
+
+fn gen_quad(x: i16, y: i16, w: i16, h: i16, u:u16, v:u16, color: Color) -> [Vertex;4] {
+    assert!(w > 0);
+    assert!(h > 0);
+    let w_ = w as u16;
+    let h_ = h as u16;
     [
-        Vertex{x:x+0,  y:y+0, u:u+0, v:v+0, color}, // top left
-        Vertex{x:x+0,  y:y+h, u:u+0, v:v+h, color}, // bottom left
-        Vertex{x:x+w,  y:y+0, u:u+w, v:v+0, color}, // top right
-        Vertex{x:x+w,  y:y+h, u:u+w, v:v+h, color}, // bottom right
+        Vertex{x:x+0,  y:y+0, u:u+0,  v:v+0,  color}, // top left
+        Vertex{x:x+0,  y:y+h, u:u+0,  v:v+h_, color}, // bottom left
+        Vertex{x:x+w,  y:y+0, u:u+w_, v:v+0,  color}, // top right
+        Vertex{x:x+w,  y:y+h, u:u+w_, v:v+h_, color}, // bottom right
     ]
 }
 
@@ -106,7 +119,7 @@ fn push_quad_indices(ptr:*mut core::ffi::c_void, i:u16) -> *mut core::ffi::c_voi
 }
 
 fn push_char(ptr:*mut core::ffi::c_void, face: &ft::Face, size:isize, ch:char) -> (*mut core::ffi::c_void,vk::Extent2D,u32) {
-    face.set_char_size(0, size*64, 0, 0).unwrap();
+    //face.set_char_size(0, size*64, 0, 0).unwrap();
     face.load_char(ch as usize, ft::face::LoadFlag::RENDER|ft::face::LoadFlag::FORCE_AUTOHINT).unwrap();
     let glyph = face.glyph();
     let bitmap = glyph.bitmap();
@@ -127,6 +140,190 @@ fn push_char(ptr:*mut core::ffi::c_void, face: &ft::Face, size:isize, ch:char) -
     (unsafe{ptr.byte_add(buffer.len())}, extent, pitch)
 }
 
+// shaping /////////////////////////////////////////////////////////////////////
+
+fn new_locale(lang: &str, script: hb::hb_script_t, direction: hb::hb_direction_t) -> hb::hb_segment_properties_t {
+    // zero initialize struct (due to reserved fields in the c-struct)
+    let mut ret = unsafe{core::mem::MaybeUninit::<hb::hb_segment_properties_t>::zeroed().assume_init()};
+    ret.language = unsafe{hb::hb_language_from_string(lang.as_ptr() as *const i8, lang.len() as i32)};
+    ret.direction = direction;
+    ret.script = script;
+    return ret;
+}
+
+// freetype integration of harfbuzz_sys 0.6.1 is missing these bindings
+#[link(name="harfbuzz")]
+extern{
+    //fn hb_ft_font_get_face(hb_font: *mut hb::hb_font_t) -> ft::ffi::FT_Face;
+    fn hb_ft_font_set_funcs(hb_font: *mut hb::hb_font_t);
+    fn hb_ft_font_set_load_flags(hb_font: *mut hb::hb_font_t, load_flags: i32);
+}
+
+// placeholder GlyphCache that just puts all glyphs on a single row of the texture
+struct GlyphCache{
+    current_x: u16,
+}
+impl GlyphCache {
+    fn new() -> Self { Self { current_x:0 } }
+    fn new_rect(&mut self, width: u16, _height:u16) -> (u16,u16) {
+        let ret = (self.current_x, 0);
+        self.current_x += width;
+        ret
+    }
+}
+
+fn gen_buffer_image_copy(
+        buffer_offset: u64,
+        pitch : u32,
+        width : u32, height: u32,
+        u: i32, v: i32) -> vk::BufferImageCopy {
+    vk::BufferImageCopy{
+        buffer_offset,
+        buffer_row_length: pitch,
+        buffer_image_height: 0,
+        image_offset: vk::Offset3D{x:u, y:v, z:0},
+        image_extent: vk::Extent3D{width, height, depth: 1},
+        image_subresource: vk::ImageSubresourceLayers{
+            layer_count: 1,
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_array_layer: 0,
+            mip_level: 0
+        }
+    }
+}
+
+#[derive(Default)]
+struct Text{
+    vertices       : Vec<[Vertex;4]>,
+    buffer_updates : Vec<vk::BufferImageCopy>,
+    pixels         : Vec<u8>,
+}
+
+// render_line_of_text(): renders position-indepenent line of text.
+//
+// Text rendering can fundamentally not be cleanly separated into parts. Everything affects
+// everything else. This means the easiest thing to do is have a monolithic function that does
+// everything. It's better to have a monolithic function as API that can hide language
+// complexities, than have a complex API.
+//
+// This function SHOULD be stateless appart from:
+// - glyph cache
+// - passed-in position
+//
+// TODO: add text-layout features like line breaking
+fn render_line_of_text(
+        buffer:      *mut hb::hb_buffer_t,
+        glyph_cache: &mut GlyphCache,
+        ft_face :    &ft::Face,
+        hb_font :    *mut hb::hb_font_t,
+        features:    &[hb::hb_feature_t],
+        locale:      &hb::hb_segment_properties_t,
+        start_position: (i32,i32),
+        color:       Color,
+        text:        &str) -> Text {
+    use hb::*;
+    unsafe{
+        hb_buffer_reset(buffer);
+        hb_buffer_add_utf8(buffer, text.as_ptr() as *const i8, text.len() as i32, 0, -1);
+        hb_buffer_set_segment_properties(buffer, locale);
+        hb_shape(hb_font, buffer, if features.len()==0 {core::ptr::null()} else {features.as_ptr()}, features.len() as u32);
+    };
+
+    let mut glyph_info_count = 0;
+    let glyph_info_ptr = unsafe{hb_buffer_get_glyph_infos(buffer, &mut glyph_info_count)};
+    let glyph_infos = unsafe{core::slice::from_raw_parts_mut(glyph_info_ptr, glyph_info_count as usize)};
+
+    let mut glyph_pos_count = 0;
+    let glyph_pos_ptr = unsafe{hb_buffer_get_glyph_positions(buffer, &mut glyph_pos_count)};
+    let glyph_positons = unsafe{core::slice::from_raw_parts_mut(glyph_pos_ptr, glyph_pos_count as usize)};
+
+    assert_eq!(glyph_info_count, glyph_pos_count);
+    //let mut ret = Vec::with_capacity(glyph_info_count as usize);
+
+    //let round_multiple = 64;
+    //let round_fn = move|x:i32| (((x as f64)/(round_multiple as f64)).round_ties_even()*(round_multiple as f64)) as i32;
+    println!("id\tpos.x\tpos.y\tpitch\twidth\theight\tleft\ttop");
+    let mut text = Text::default();
+    let mut cursor = start_position;
+    for (info,pos) in std::iter::zip(glyph_infos, glyph_positons) {
+        let id = info.codepoint; // actually glyph index, not codepoint
+        let x = cursor.0 + (pos.x_offset/64);
+        let y = cursor.0 + (pos.y_offset/64);
+
+        // todo: actual glyph caching
+        ft_face.load_glyph(id, ft::face::LoadFlag::RENDER | ft::face::LoadFlag::FORCE_AUTOHINT);
+        let glyph = ft_face.glyph();
+        let bitmap = glyph.bitmap();
+        let width  = bitmap.width();
+        let height = bitmap.rows() ;
+        let pitch  = bitmap.pitch();
+        let left = glyph.bitmap_left();
+        let top  = glyph.bitmap_top();
+
+        if width<=0 || height<=0 { continue }; // invisible character, ignore for rendering
+
+        let uv = glyph_cache.new_rect(width as u16, height as u16);
+        let update_rect = gen_buffer_image_copy(
+            text.pixels.len() as u64,
+            pitch as u32, width as u32, height as u32,
+            uv.0 as i32,
+            uv.1 as i32);
+        for b in bitmap.buffer() {
+            text.pixels.push(*b);
+        }
+
+        let quad = gen_quad((x-left) as i16,
+                            (y-top)  as i16,
+                            width as i16, height as i16,
+                            uv.0, uv.1,
+                            color);
+
+        println!("{id:5}:\t{x:4}\t{y:4}\t{pitch:4}\t{width:4}\t{height:4}\t{left:4}\t{top:4}");
+        println!(" 0 -> {:?}", quad[0]);
+        println!(" 1 -> {:?}", quad[1]);
+        println!(" 2 -> {:?}", quad[2]);
+        println!(" 3 -> {:?}", quad[3]);
+
+        cursor.0 += pos.x_advance / 64;
+        cursor.1 += pos.y_advance / 64;
+    }
+    return text;
+}
+
+#[derive(Debug)]
+struct GlyphUpdate{
+    start:    u32,
+    pitch:    u16,
+    extent:  (u16,u16),
+    bearing: (i16,i16),
+    texcoord:(u16,u16),
+}
+
+fn rasterize_glyph(texcoord  : &mut u16,
+                   ft_face   : &ft::Face,
+                   glyph_idx : u32,
+                   out_pixels: &mut Vec<u8>,
+                   out_glyphs: &mut Vec<GlyphUpdate>){
+    ft_face.load_glyph(glyph_idx, ft::face::LoadFlag::RENDER | ft::face::LoadFlag::FORCE_AUTOHINT);
+    let glyph = ft_face.glyph();
+    if glyph.bitmap().width() == 0 || glyph.bitmap().rows() == 0 { return; }
+    let start = out_pixels.len();
+    for b in glyph.bitmap().buffer() {
+        out_pixels.push(*b)
+    }
+    let uv = (*texcoord,0u16);
+    *texcoord += glyph.bitmap().width() as u16;
+    out_glyphs.push(GlyphUpdate{
+        start:   start as u32,
+        pitch:   glyph.bitmap().pitch() as u16,
+        extent: (glyph.bitmap().width() as u16, glyph.bitmap().rows() as u16),
+        bearing:(glyph.bitmap_left()    as i16, glyph.bitmap_top()    as i16),
+        texcoord: uv,
+    });
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 #[derive(Default)]
 enum App{
     #[default] Uninitialized,
@@ -139,8 +336,9 @@ enum App{
         pipeline_layout : vk::PipelineLayout,
         descriptor_set : vk::DescriptorSet,
         image : vk::Image,
-        //freetype_lib  : ft::Library,
-        face : ft::Face
+        ft_face : ft::Face,
+        hb_font : *mut hb::hb_font_t,
+        hb_buffer : *mut hb::hb_buffer_t,
     },
 }
 impl ApplicationHandler for App {
@@ -149,7 +347,15 @@ impl ApplicationHandler for App {
             App::Resumed{..}    => todo!("handle re-resuming"),
             App::Uninitialized => {
                 let freetype_lib  = ft::Library::init().expect("failed to initialize freetype");
-                let face = freetype_lib.new_face("./source-sans/SourceSans3-Regular.ttf", 0).expect("could not find font");
+
+                let mut ft_face = freetype_lib.new_face("./source-sans/SourceSans3-Regular.ttf", 0).expect("could not find font");
+                ft_face.set_char_size(0, 48*64, 0, 0);
+                let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face.raw_mut())};
+                unsafe{hb_ft_font_set_funcs(hb_font)};
+                unsafe{hb_ft_font_set_load_flags(hb_font, (ft::face::LoadFlag::FORCE_AUTOHINT).bits())};
+
+
+                let hb_buffer = unsafe{hb::hb_buffer_create()};
 
                 let init_start = std::time::Instant::now();
                 let renderer = renderer::Renderer::new(event_loop);
@@ -274,7 +480,7 @@ impl ApplicationHandler for App {
                 println!("pipeline layout: {pipeline_layout:?}");
 
                 let (vs,fs) = renderer.load_glsl_vs_fs("shaders/text-renderer.vert.glsl", "shaders/text-renderer.frag.glsl", &push_constant_ranges, &set_layouts);
-                let Some((bar_buffer, bar_memory)) = renderer.map_bar_buffer(128<<20,
+                let Some((bar_buffer, bar_memory)) = renderer.map_bar_buffer(64<<20,
                     vk::BufferUsageFlags::VERTEX_BUFFER
                   | vk::BufferUsageFlags::INDEX_BUFFER
                   | vk::BufferUsageFlags::TRANSFER_SRC) else {panic!(":(")};
@@ -286,7 +492,7 @@ impl ApplicationHandler for App {
                 println!("{:>13?} renderer new", init_render-init_start);
                 println!("{:>13?} post renderer", init_end-init_render);
                 println!("{:>13?} total init", init_end-init_start);
-                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, face};
+                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, ft_face, hb_font, hb_buffer};
             },
         }
     }
@@ -298,24 +504,28 @@ impl ApplicationHandler for App {
                 event_loop.exit()
             },
             WindowEvent::RedrawRequested => {
-                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, face} = self else { panic!("not active!") };
+                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, ft_face, hb_font, hb_buffer} = self else { panic!("not active!") };
                 println!("================================================================================");
                 let winsize = renderer.window.inner_size();
                 let win_w = winsize.width as f32;
                 let win_h = winsize.height as f32;
 
-
                 let mut frame = renderer.wait_for_frame();
 
+                let english = new_locale("en", hb::HB_SCRIPT_LATIN, hb::HB_DIRECTION_LTR);
+                let mut glyph_cache = GlyphCache::new();
+                let mut cursor = (50,50);
+                let text = render_line_of_text(*hb_buffer, &mut glyph_cache, ft_face, *hb_font, &[], &english, cursor, Color::WHITE, "Hello, 'World'! VAVAVA");
+
                 let verts_start = *bar_memory;
-                let index_start = push_quad_verts(verts_start, gen_quad((10,10), (256,256), (0,0), Color::WHITE));
+                let index_start = push_quad_verts(verts_start, gen_quad(10,10, 256,256, 0,0, Color::WHITE));
                 let image_1 = push_quad_indices(index_start, 0);
 
-                let (image_2, img_size_1, img_pitch_1) = push_char(image_1, face, 24, 'A');
-                let (image_3, img_size_2, img_pitch_2) = push_char(image_2, face, 24, 'B');
-                let (bar_end, img_size_3, img_pitch_3) = push_char(image_3, face, 24, 'C');
+                let (image_2, img_size_1, img_pitch_1) = push_char(image_1, ft_face, 24, 'A');
+                let (image_3, img_size_2, img_pitch_2) = push_char(image_2, ft_face, 24, 'B');
+                let (bar_end, img_size_3, img_pitch_3) = push_char(image_3, ft_face, 24, 'C');
 
-                let index_buffer_offset = unsafe{index_start.byte_offset_from(*bar_memory)} as u64;
+                let index_buffer_offset   = unsafe{index_start.byte_offset_from(*bar_memory)} as u64;
                 let image_buffer_offset_1 = unsafe{image_1.byte_offset_from(*bar_memory)} as u64;
                 let image_buffer_offset_2 = unsafe{image_2.byte_offset_from(*bar_memory)} as u64;
                 let image_buffer_offset_3 = unsafe{image_3.byte_offset_from(*bar_memory)} as u64;
@@ -367,7 +577,7 @@ impl ApplicationHandler for App {
                 frame.bind_vertex_buffer(*bar_buffer);
                 frame.bind_index_buffer(*bar_buffer, index_buffer_offset);
                 frame.set_vertex_input(core::mem::size_of::<Vertex>() as u32, &[
-                    (0, vk::Format::R16G16_UINT),
+                    (0, vk::Format::R16G16_SINT),
                     (4, vk::Format::R16G16_UINT),
                     (8, vk::Format::R8G8B8A8_UNORM),
                 ]);

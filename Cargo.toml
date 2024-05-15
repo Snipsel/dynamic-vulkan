@@ -11,8 +11,9 @@ panic="abort"
 strip="symbols"
 
 [dependencies]
+harfbuzz-sys = {version="0.6.1", features=['freetype']}
 freetype-rs = "0.36"
-shaderc     = {version="0.8", optional = false} # in future: optional dependency
+shaderc     = {version="0.8", optional = false} # in future: make optional dependency
 winit       = "0.30"
 ash         = "0.38"
 bitflags    = "2"
