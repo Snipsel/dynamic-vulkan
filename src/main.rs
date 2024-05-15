@@ -2,7 +2,7 @@
 mod renderer;
 
 use std::{
-    collections::HashSet, ffi::{CStr,OsStr}, fmt, mem::size_of, ptr
+    collections::HashMap, ffi::{CStr,OsStr}, fmt, mem::size_of, ptr
 };
 use freetype as ft;
 use harfbuzz_sys as hb;
@@ -62,25 +62,6 @@ struct Vertex{
     color: Color
 }
 
-/*
-fn gen_quad_rect2d(rect:vk::Rect2D, texcoords:vk::Offset2D, color: Color) -> [Vertex;4] {
-    let x :u16 = rect.offset.x.try_into().unwrap();
-    let y :u16 = rect.offset.y.try_into().unwrap();
-    let w :u16 = rect.extent.width.try_into().unwrap();
-    let h :u16 = rect.extent.height.try_into().unwrap();
-    let u :u16 = texcoords.x.try_into().unwrap();
-    let v :u16 = texcoords.y.try_into().unwrap();
-    gen_quad(x, y, w, h, u, v, color)
-}
-
-fn gen_quad_pairs(pos:(i16,i16), size:(u16,u16), texcoords:(u16,u16), color: Color) -> [Vertex;4] {
-    let (x,y) = pos;
-    let (w,h) = size;
-    let (u,v) = texcoords;
-    gen_quad(x,y,w,h,u,v,color)
-}
-*/
-
 fn gen_quad(x: i16, y: i16, w: i16, h: i16, u:u16, v:u16, color: Color) -> [Vertex;4] {
     assert!(w > 0);
     assert!(h > 0);
@@ -110,30 +91,6 @@ fn push_quad_indices(ptr:*mut core::ffi::c_void, i:u16) -> *mut core::ffi::c_voi
     unsafe{push_type::<[u16;6]>(ptr, indices)}
 }
 
-/*
-fn push_char(ptr:*mut core::ffi::c_void, face: &ft::Face, size:isize, ch:char) -> (*mut core::ffi::c_void,vk::Extent2D,u32) {
-    //face.set_char_size(0, size*64, 0, 0).unwrap();
-    face.load_char(ch as usize, ft::face::LoadFlag::RENDER|ft::face::LoadFlag::FORCE_AUTOHINT).unwrap();
-    let glyph = face.glyph();
-    let bitmap = glyph.bitmap();
-    let extent = vk::Extent2D{
-        width:  bitmap.width() as u32,
-        height: bitmap.rows()  as u32,
-    };
-    let pitch  = bitmap.pitch() as u32;
-    let buffer = bitmap.buffer();
-
-    // inefficient. how to volatile memcpy?
-    let u8_ptr : *mut u8 = unsafe{core::mem::transmute(ptr)};
-    for (i,b) in buffer.into_iter().enumerate() {
-        unsafe{u8_ptr.add(i).write_volatile(*b);}
-    }
-    // unstable: unsafe{core::intrinsics::volatile_copy_memory(u8_ptr, buffer.as_ptr(), buffer.len())};
-
-    (unsafe{ptr.byte_add(buffer.len())}, extent, pitch)
-}
-*/
-
 // shaping /////////////////////////////////////////////////////////////////////
 
 fn new_locale(lang: &str, script: hb::hb_script_t, direction: hb::hb_direction_t) -> hb::hb_segment_properties_t {
@@ -154,13 +111,30 @@ extern{
 }
 
 // placeholder GlyphCache that just puts all glyphs on a single row of the texture
+#[derive(Copy,Clone)]
+struct GlyphCacheEntry{
+    u: u16,
+    v: u16,
+    left: i16,
+    top:  i16,
+    width: u16,
+    height: u16,
+}
 struct GlyphCache{
+    map: HashMap<u32,GlyphCacheEntry>,
     current_x: u16,
 }
 impl GlyphCache {
-    fn new() -> Self { Self { current_x:0 } }
-    fn new_rect(&mut self, width: u16, _height:u16) -> (u16,u16) {
+    fn new() -> Self { Self { map: HashMap::new(), current_x:0 } }
+    fn get(&self, glyph_id:u32) -> Option<GlyphCacheEntry> {
+        self.map.get(&glyph_id).copied()
+    }
+    fn insert(&mut self, glyph_id: u32, width: u16, height:u16, left: i16, top: i16) -> (u16,u16) {
         let ret = (self.current_x, 0);
+        self.map.insert(glyph_id, GlyphCacheEntry{
+            u: ret.0, v: ret.1,
+            width, height, left, top
+        });
         self.current_x += width;
         ret
     }
@@ -194,8 +168,8 @@ struct Text{
     pixels         : Vec<u8>,
 }
 
-// render_line_of_text(): renders position-indepenent line of text.
-//
+fn div_round(a:i32, b:i32) -> i32 { (a+(b/2))/b }
+
 // Text rendering can fundamentally not be cleanly separated into parts. Everything affects
 // everything else. This means the easiest thing to do is have a monolithic function that does
 // everything. It's better to have a monolithic function as API that can hide language
@@ -234,90 +208,53 @@ fn render_line_of_text(
     let glyph_positons = unsafe{core::slice::from_raw_parts_mut(glyph_pos_ptr, glyph_pos_count as usize)};
 
     assert_eq!(glyph_info_count, glyph_pos_count);
-    //let mut ret = Vec::with_capacity(glyph_info_count as usize);
 
-    //let round_multiple = 64;
-    //let round_fn = move|x:i32| (((x as f64)/(round_multiple as f64)).round_ties_even()*(round_multiple as f64)) as i32;
     let mut cursor = start_position;
     for (info,pos) in std::iter::zip(glyph_infos, glyph_positons) {
         let id = info.codepoint; // actually glyph index, not codepoint
-        let x = cursor.0 + (pos.x_offset/64);
-        let y = cursor.1 + (pos.y_offset/64);
+        let x = cursor.0 + div_round(pos.x_offset, 64);
+        let y = cursor.1 + div_round(pos.y_offset, 64);
 
-        // todo: actual glyph caching
-        ft_face.load_glyph(id, ft::face::LoadFlag::RENDER | ft::face::LoadFlag::FORCE_AUTOHINT);
-        let glyph = ft_face.glyph();
-        let bitmap = glyph.bitmap();
-        let width  = bitmap.width();
-        let height = bitmap.rows() ;
-        let pitch  = bitmap.pitch();
-        let left = glyph.bitmap_left();
-        let top  = glyph.bitmap_top();
-
-        if width<=0 || height<=0 { continue }; // invisible character, ignore for rendering
-
-        let uv = glyph_cache.new_rect(width as u16, height as u16);
-        let buffer_update = gen_buffer_image_copy(
-            ret.pixels.len() as u64,
-            pitch as u32, width as u32, height as u32,
-            uv.0 as i32,
-            uv.1 as i32);
-        let quad = gen_quad((x+left) as i16,
-                            (y-top)  as i16,
-                            width as i16, height as i16,
-                            uv.0, uv.1,
-                            color);
-
-        ret.quads.push(quad);
-        ret.buffer_updates.push(buffer_update);
-        for b in bitmap.buffer() {
-            ret.pixels.push(*b);
+        if let Some(entry) = glyph_cache.get(id) {
+            if entry.width<=0 || entry.height<=0 { continue }; // invisible character, ignore for rendering
+            ret.quads.push(
+                gen_quad(x as i16 + entry.left,
+                         y as i16 - entry.top,
+                         entry.width as i16, 
+                         entry.height as i16,
+                         entry.u, entry.v,
+                         color));
+        }else{
+            ft_face.load_glyph(id, ft::face::LoadFlag::RENDER | ft::face::LoadFlag::FORCE_AUTOHINT);
+            let glyph = ft_face.glyph();
+            let bitmap = glyph.bitmap();
+            let width  = bitmap.width();
+            let height = bitmap.rows() ;
+            let pitch  = bitmap.pitch();
+            let left = glyph.bitmap_left();
+            let top  = glyph.bitmap_top();
+            if width<=0 || height<=0 { continue }; // invisible character, ignore for rendering
+            let uv = glyph_cache.insert(id, width as u16, height as u16, left as i16, top as i16);
+            ret.quads.push(
+                gen_quad((x+left) as i16,
+                         (y-top)  as i16,
+                         width as i16, height as i16,
+                         uv.0, uv.1,
+                         color));
+            ret.buffer_updates.push(
+                gen_buffer_image_copy(
+                    ret.pixels.len() as u64,
+                    pitch as u32, width as u32, height as u32,
+                    uv.0 as i32,
+                    uv.1 as i32));
+            for b in bitmap.buffer() {
+                ret.pixels.push(*b);
+            }
         }
 
-        cursor.0 += pos.x_advance / 64;
-        cursor.1 += pos.y_advance / 64;
+        cursor.0 += div_round(pos.x_advance, 64);
+        cursor.1 += div_round(pos.y_advance, 64);
     }
-}
-
-fn debug_print_text(text: &Text){
-    for quad in &text.quads {
-        println!(" 0 -> {:?}", quad[0]);
-        println!(" 1 -> {:?}", quad[1]);
-        println!(" 2 -> {:?}", quad[2]);
-        println!(" 3 -> {:?}", quad[3]);
-    }
-}
-
-#[derive(Debug)]
-struct GlyphUpdate{
-    start:    u32,
-    pitch:    u16,
-    extent:  (u16,u16),
-    bearing: (i16,i16),
-    texcoord:(u16,u16),
-}
-
-fn rasterize_glyph(texcoord  : &mut u16,
-                   ft_face   : &ft::Face,
-                   glyph_idx : u32,
-                   out_pixels: &mut Vec<u8>,
-                   out_glyphs: &mut Vec<GlyphUpdate>){
-    ft_face.load_glyph(glyph_idx, ft::face::LoadFlag::RENDER | ft::face::LoadFlag::FORCE_AUTOHINT);
-    let glyph = ft_face.glyph();
-    if glyph.bitmap().width() == 0 || glyph.bitmap().rows() == 0 { return; }
-    let start = out_pixels.len();
-    for b in glyph.bitmap().buffer() {
-        out_pixels.push(*b)
-    }
-    let uv = (*texcoord,0u16);
-    *texcoord += glyph.bitmap().width() as u16;
-    out_glyphs.push(GlyphUpdate{
-        start:   start as u32,
-        pitch:   glyph.bitmap().pitch() as u16,
-        extent: (glyph.bitmap().width() as u16, glyph.bitmap().rows() as u16),
-        bearing:(glyph.bitmap_left()    as i16, glyph.bitmap_top()    as i16),
-        texcoord: uv,
-    });
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -517,16 +454,13 @@ impl ApplicationHandler for App {
                 let mut text = Text::default();
 
                 render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, ft_face, *hb_font, &[], &english, cursor, Color::WHITE, "Hello, 'World'! VAVAVA");
-                //text.quads.push(gen_quad(50, 200, glyph_cache.current_x as i16, 50, 0, 0, Color::WHITE)); // debug: visualize glyph_cache
-
-                debug_print_text(&text);
+                text.quads.push(gen_quad(50, 200, glyph_cache.current_x as i16, 50, 0, 0, Color{r:0xFF,g:0xFF,b:0x00,a:0xFF})); // debug: visualize glyph_cache
 
                 // copy text into bar memory
                 let mut bar_ptr = *bar_memory;
                 let vertex_start = bar_ptr;
                 let quad_count = text.quads.len();
                 for quads in text.quads {
-                    println!("{bar_ptr:?} + {:3} quad", core::mem::size_of::<[Vertex;4]>());
                     bar_ptr = unsafe{push_type::<[Vertex;4]>(bar_ptr, quads)};
                 }
                 let index_buffer_offset   = unsafe{bar_ptr.byte_offset_from(*bar_memory)} as u64;
@@ -548,8 +482,6 @@ impl ApplicationHandler for App {
                 }
 
                 frame.buffer_to_image(*bar_buffer, *image, &text.buffer_updates);
-
-                println!("index buffer offset: {index_buffer_offset:x}");
 
                 frame.begin_rendering();
                 frame.bind_vs_fs(*vs, *fs);
