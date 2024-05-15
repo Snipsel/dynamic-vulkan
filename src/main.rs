@@ -19,14 +19,6 @@ use ash::{
 };
 use bitflags::bitflags;
 
-// render strategy
-// - single queue
-// - one BAR memory chunk
-//   - buffer_to_img
-//   - vertices
-//   - indices
-// - one gpu memory texture
-
 fn begin_oneshot_cmd(renderer: &renderer::Renderer) -> vk::CommandBuffer {
     let alloc_info = vk::CommandBufferAllocateInfo::default()
         .level(vk::CommandBufferLevel::PRIMARY)
@@ -118,6 +110,7 @@ fn push_quad_indices(ptr:*mut core::ffi::c_void, i:u16) -> *mut core::ffi::c_voi
     unsafe{push_type::<[u16;6]>(ptr, indices)}
 }
 
+/*
 fn push_char(ptr:*mut core::ffi::c_void, face: &ft::Face, size:isize, ch:char) -> (*mut core::ffi::c_void,vk::Extent2D,u32) {
     //face.set_char_size(0, size*64, 0, 0).unwrap();
     face.load_char(ch as usize, ft::face::LoadFlag::RENDER|ft::face::LoadFlag::FORCE_AUTOHINT).unwrap();
@@ -139,6 +132,7 @@ fn push_char(ptr:*mut core::ffi::c_void, face: &ft::Face, size:isize, ch:char) -
 
     (unsafe{ptr.byte_add(buffer.len())}, extent, pitch)
 }
+*/
 
 // shaping /////////////////////////////////////////////////////////////////////
 
@@ -172,15 +166,16 @@ impl GlyphCache {
     }
 }
 
-fn gen_buffer_image_copy(
-        buffer_offset: u64,
-        pitch : u32,
-        width : u32, height: u32,
-        u: i32, v: i32) -> vk::BufferImageCopy {
+fn gen_buffer_image_copy( buffer_offset: u64,
+                          pitch : u32,
+                          width : u32,
+                          height: u32,
+                          u: i32,
+                          v: i32) -> vk::BufferImageCopy {
     vk::BufferImageCopy{
         buffer_offset,
         buffer_row_length: pitch,
-        buffer_image_height: 0,
+        buffer_image_height: height, // 0 should also be fine
         image_offset: vk::Offset3D{x:u, y:v, z:0},
         image_extent: vk::Extent3D{width, height, depth: 1},
         image_subresource: vk::ImageSubresourceLayers{
@@ -194,7 +189,7 @@ fn gen_buffer_image_copy(
 
 #[derive(Default)]
 struct Text{
-    vertices       : Vec<[Vertex;4]>,
+    quads       : Vec<[Vertex;4]>,
     buffer_updates : Vec<vk::BufferImageCopy>,
     pixels         : Vec<u8>,
 }
@@ -212,6 +207,7 @@ struct Text{
 //
 // TODO: add text-layout features like line breaking
 fn render_line_of_text(
+        ret:         &mut Text,
         buffer:      *mut hb::hb_buffer_t,
         glyph_cache: &mut GlyphCache,
         ft_face :    &ft::Face,
@@ -220,7 +216,7 @@ fn render_line_of_text(
         locale:      &hb::hb_segment_properties_t,
         start_position: (i32,i32),
         color:       Color,
-        text:        &str) -> Text {
+        text:        &str){
     use hb::*;
     unsafe{
         hb_buffer_reset(buffer);
@@ -242,13 +238,11 @@ fn render_line_of_text(
 
     //let round_multiple = 64;
     //let round_fn = move|x:i32| (((x as f64)/(round_multiple as f64)).round_ties_even()*(round_multiple as f64)) as i32;
-    println!("id\tpos.x\tpos.y\tpitch\twidth\theight\tleft\ttop");
-    let mut text = Text::default();
     let mut cursor = start_position;
     for (info,pos) in std::iter::zip(glyph_infos, glyph_positons) {
         let id = info.codepoint; // actually glyph index, not codepoint
         let x = cursor.0 + (pos.x_offset/64);
-        let y = cursor.0 + (pos.y_offset/64);
+        let y = cursor.1 + (pos.y_offset/64);
 
         // todo: actual glyph caching
         ft_face.load_glyph(id, ft::face::LoadFlag::RENDER | ft::face::LoadFlag::FORCE_AUTOHINT);
@@ -263,31 +257,35 @@ fn render_line_of_text(
         if width<=0 || height<=0 { continue }; // invisible character, ignore for rendering
 
         let uv = glyph_cache.new_rect(width as u16, height as u16);
-        let update_rect = gen_buffer_image_copy(
-            text.pixels.len() as u64,
+        let buffer_update = gen_buffer_image_copy(
+            ret.pixels.len() as u64,
             pitch as u32, width as u32, height as u32,
             uv.0 as i32,
             uv.1 as i32);
-        for b in bitmap.buffer() {
-            text.pixels.push(*b);
-        }
-
-        let quad = gen_quad((x-left) as i16,
+        let quad = gen_quad((x+left) as i16,
                             (y-top)  as i16,
                             width as i16, height as i16,
                             uv.0, uv.1,
                             color);
 
-        println!("{id:5}:\t{x:4}\t{y:4}\t{pitch:4}\t{width:4}\t{height:4}\t{left:4}\t{top:4}");
-        println!(" 0 -> {:?}", quad[0]);
-        println!(" 1 -> {:?}", quad[1]);
-        println!(" 2 -> {:?}", quad[2]);
-        println!(" 3 -> {:?}", quad[3]);
+        ret.quads.push(quad);
+        ret.buffer_updates.push(buffer_update);
+        for b in bitmap.buffer() {
+            ret.pixels.push(*b);
+        }
 
         cursor.0 += pos.x_advance / 64;
         cursor.1 += pos.y_advance / 64;
     }
-    return text;
+}
+
+fn debug_print_text(text: &Text){
+    for quad in &text.quads {
+        println!(" 0 -> {:?}", quad[0]);
+        println!(" 1 -> {:?}", quad[1]);
+        println!(" 2 -> {:?}", quad[2]);
+        println!(" 3 -> {:?}", quad[3]);
+    }
 }
 
 #[derive(Debug)]
@@ -510,67 +508,48 @@ impl ApplicationHandler for App {
                 let win_w = winsize.width as f32;
                 let win_h = winsize.height as f32;
 
+
                 let mut frame = renderer.wait_for_frame();
 
                 let english = new_locale("en", hb::HB_SCRIPT_LATIN, hb::HB_DIRECTION_LTR);
                 let mut glyph_cache = GlyphCache::new();
                 let mut cursor = (50,50);
-                let text = render_line_of_text(*hb_buffer, &mut glyph_cache, ft_face, *hb_font, &[], &english, cursor, Color::WHITE, "Hello, 'World'! VAVAVA");
+                let mut text = Text::default();
 
-                let verts_start = *bar_memory;
-                let index_start = push_quad_verts(verts_start, gen_quad(10,10, 256,256, 0,0, Color::WHITE));
-                let image_1 = push_quad_indices(index_start, 0);
+                render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, ft_face, *hb_font, &[], &english, cursor, Color::WHITE, "Hello, 'World'! VAVAVA");
+                //text.quads.push(gen_quad(50, 200, glyph_cache.current_x as i16, 50, 0, 0, Color::WHITE)); // debug: visualize glyph_cache
 
-                let (image_2, img_size_1, img_pitch_1) = push_char(image_1, ft_face, 24, 'A');
-                let (image_3, img_size_2, img_pitch_2) = push_char(image_2, ft_face, 24, 'B');
-                let (bar_end, img_size_3, img_pitch_3) = push_char(image_3, ft_face, 24, 'C');
+                debug_print_text(&text);
 
-                let index_buffer_offset   = unsafe{index_start.byte_offset_from(*bar_memory)} as u64;
-                let image_buffer_offset_1 = unsafe{image_1.byte_offset_from(*bar_memory)} as u64;
-                let image_buffer_offset_2 = unsafe{image_2.byte_offset_from(*bar_memory)} as u64;
-                let image_buffer_offset_3 = unsafe{image_3.byte_offset_from(*bar_memory)} as u64;
+                // copy text into bar memory
+                let mut bar_ptr = *bar_memory;
+                let vertex_start = bar_ptr;
+                let quad_count = text.quads.len();
+                for quads in text.quads {
+                    println!("{bar_ptr:?} + {:3} quad", core::mem::size_of::<[Vertex;4]>());
+                    bar_ptr = unsafe{push_type::<[Vertex;4]>(bar_ptr, quads)};
+                }
+                let index_buffer_offset   = unsafe{bar_ptr.byte_offset_from(*bar_memory)} as u64;
+                for i in 0..quad_count {
+                    bar_ptr = push_quad_indices(bar_ptr, (i*4) as u16);
+                }
 
-                frame.buffer_to_image(*bar_buffer, *image, &[
-                    vk::BufferImageCopy{
-                        buffer_offset: image_buffer_offset_1,
-                        buffer_row_length: img_pitch_1,
-                        buffer_image_height: 0,
-                        image_offset: vk::Offset3D{x:0,y:0,z:0},
-                        image_extent: img_size_1.into(),
-                        image_subresource: vk::ImageSubresourceLayers{
-                            layer_count: 1,
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_array_layer: 0,
-                            mip_level: 0
-                        }
-                    },
-                    vk::BufferImageCopy{
-                        buffer_offset: image_buffer_offset_2,
-                        buffer_row_length: img_pitch_2,
-                        buffer_image_height: 0,
-                        image_offset: vk::Offset3D{x:25,y:0,z:0},
-                        image_extent: img_size_2.into(),
-                        image_subresource: vk::ImageSubresourceLayers{
-                            layer_count: 1,
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_array_layer: 0,
-                            mip_level: 0
-                        }
-                    },
-                    vk::BufferImageCopy{
-                        buffer_offset: image_buffer_offset_3,
-                        buffer_row_length: img_pitch_3,
-                        buffer_image_height: 0,
-                        image_offset: vk::Offset3D{x:50,y:0,z:0},
-                        image_extent: img_size_3.into(),
-                        image_subresource: vk::ImageSubresourceLayers{
-                            layer_count: 1,
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_array_layer: 0,
-                            mip_level: 0
-                        }
-                    }
-                ]);
+                let pixel_buffer_offset   = unsafe{bar_ptr.byte_offset_from(*bar_memory)} as u64;
+                for b in text.pixels.iter() {
+                    // inefficient?
+                    unsafe{core::mem::transmute::<*mut core::ffi::c_void, *mut u8>(bar_ptr).write_volatile(*b);}
+                    bar_ptr = unsafe{bar_ptr.byte_add(1)};
+                }
+                let buffer_end = bar_ptr;
+
+                // add pixel offset to the buffers
+                for mut update in &mut text.buffer_updates {
+                    update.buffer_offset += pixel_buffer_offset;
+                }
+
+                frame.buffer_to_image(*bar_buffer, *image, &text.buffer_updates);
+
+                println!("index buffer offset: {index_buffer_offset:x}");
 
                 frame.begin_rendering();
                 frame.bind_vs_fs(*vs, *fs);
@@ -594,7 +573,7 @@ impl ApplicationHandler for App {
                 ]);
                 frame.bind_descriptor_set(*descriptor_set, *pipeline_layout);
                 frame.push_constant(*pipeline_layout, &[2.0/win_w, 2.0/win_h, win_w/2.0, win_h/2.0]);
-                frame.draw_indexed(6, 0, 0);
+                frame.draw_indexed((quad_count*6) as u32, 0, 0);
             },
             _ => (),
         }
