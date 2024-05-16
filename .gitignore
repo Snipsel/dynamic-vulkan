@@ -3,6 +3,7 @@
 !/cargo.toml
 !/cargo.lock
 !/src
+!/*.sh
 !/shaders
 
 

@@ -6,7 +6,7 @@ use std::{
 };
 use freetype as ft;
 use harfbuzz_sys as hb;
-use hb::hb_language_t;
+use hb::{freetype::hb_ft_font_create_referenced, hb_face_create, hb_font_get_face, hb_font_set_variations, hb_language_t};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -91,8 +91,6 @@ fn push_quad_indices(ptr:*mut core::ffi::c_void, i:u16) -> *mut core::ffi::c_voi
     unsafe{push_type::<[u16;6]>(ptr, indices)}
 }
 
-// shaping /////////////////////////////////////////////////////////////////////
-
 fn new_locale(lang: &str, script: hb::hb_script_t, direction: hb::hb_direction_t) -> hb::hb_segment_properties_t {
     // zero initialize struct (due to reserved fields in the c-struct)
     let mut ret = unsafe{core::mem::MaybeUninit::<hb::hb_segment_properties_t>::zeroed().assume_init()};
@@ -108,7 +106,26 @@ extern{
     //fn hb_ft_font_get_face(hb_font: *mut hb::hb_font_t) -> ft::ffi::FT_Face;
     fn hb_ft_font_set_funcs(hb_font: *mut hb::hb_font_t);
     fn hb_ft_font_set_load_flags(hb_font: *mut hb::hb_font_t, load_flags: i32);
+    fn hb_ft_face_create(ft_face : ft::ffi::FT_Face, destroy : hb::hb_destroy_func_t) -> *mut hb::hb_face_t;
+    fn hb_ft_font_changed(font : *mut hb::hb_font_t);
 }
+
+/*
+struct Face{
+    ft_face: ft::Face,
+    hb_face: hb::hb_face_t,
+}
+
+impl Face {
+    fn new(freetype_lib : &ft::Library, path: &str) -> Self {
+        //let ft_face = freetype_lib.new_face(),
+        let mut ft_face = freetype_lib.new_face("./fonts/source-sans/upright.otf", 0).expect("could not find font");
+        Self{ 
+            hb_face: unsafe{*hb_ft_face_create(ft_face.raw_mut(), None)},
+        }
+    }
+}
+*/
 
 // placeholder GlyphCache that just puts all glyphs on a single row of the texture
 #[derive(Copy,Clone)]
@@ -120,18 +137,26 @@ struct GlyphCacheEntry{
     width: u16,
     height: u16,
 }
+
+#[derive(Copy,Clone,Eq,Hash,PartialEq)]
+struct GlyphCacheKey{
+    font_idx  : u32,
+    glyph_idx : u32,
+    font_size : u32,
+}
+
 struct GlyphCache{
-    map: HashMap<u32,GlyphCacheEntry>,
+    map: HashMap<GlyphCacheKey,GlyphCacheEntry>,
     current_x: u16,
 }
 impl GlyphCache {
     fn new() -> Self { Self { map: HashMap::new(), current_x:0 } }
-    fn get(&self, glyph_id:u32) -> Option<GlyphCacheEntry> {
-        self.map.get(&glyph_id).copied()
+    fn get(&self, key: &GlyphCacheKey) -> Option<GlyphCacheEntry> {
+        self.map.get(key).copied()
     }
-    fn insert(&mut self, glyph_id: u32, width: u16, height:u16, left: i16, top: i16) -> (u16,u16) {
+    fn insert(&mut self, key:GlyphCacheKey, width: u16, height:u16, left: i16, top: i16) -> (u16,u16) {
         let ret = (self.current_x, 0);
-        self.map.insert(glyph_id, GlyphCacheEntry{
+        self.map.insert(key, GlyphCacheEntry{
             u: ret.0, v: ret.1,
             width, height, left, top
         });
@@ -184,14 +209,22 @@ fn render_line_of_text(
         ret:         &mut Text,
         buffer:      *mut hb::hb_buffer_t,
         glyph_cache: &mut GlyphCache,
-        ft_face :    &ft::Face,
-        hb_font :    *mut hb::hb_font_t,
+        ft_faces:    &[ft::Face],
+        hb_fonts:    &[*mut hb::hb_font_t],
         features:    &[hb::hb_feature_t],
+        font_idx:    u32,
         locale:      &hb::hb_segment_properties_t,
         start_position: (i32,i32),
         color:       Color,
+        font_size:   u32,
         text:        &str){
     use hb::*;
+
+    let hb_font =  hb_fonts[font_idx as usize];
+    let ft_face = &ft_faces[font_idx as usize];
+    ft_face.set_char_size(0, (font_size as isize)*64, 0, 0);
+    unsafe{hb_ft_font_changed(hb_font)};
+
     unsafe{
         hb_buffer_reset(buffer);
         hb_buffer_add_utf8(buffer, text.as_ptr() as *const i8, text.len() as i32, 0, -1);
@@ -215,15 +248,16 @@ fn render_line_of_text(
         let x = cursor.0 + div_round(pos.x_offset, 64);
         let y = cursor.1 + div_round(pos.y_offset, 64);
 
-        if let Some(entry) = glyph_cache.get(id) {
-            if entry.width<=0 || entry.height<=0 { continue }; // invisible character, ignore for rendering
-            ret.quads.push(
-                gen_quad(x as i16 + entry.left,
-                         y as i16 - entry.top,
-                         entry.width as i16, 
-                         entry.height as i16,
-                         entry.u, entry.v,
-                         color));
+        if let Some(entry) = glyph_cache.get(&GlyphCacheKey{font_idx,glyph_idx:id,font_size}) {
+            if !(entry.width<=0 || entry.height<=0) { // invisible character, ignore for rendering
+                ret.quads.push(
+                    gen_quad(x as i16 + entry.left,
+                             y as i16 - entry.top,
+                             entry.width as i16, 
+                             entry.height as i16,
+                             entry.u, entry.v,
+                             color));
+            }
         }else{
             ft_face.load_glyph(id, ft::face::LoadFlag::RENDER | ft::face::LoadFlag::FORCE_AUTOHINT);
             let glyph = ft_face.glyph();
@@ -233,22 +267,24 @@ fn render_line_of_text(
             let pitch  = bitmap.pitch();
             let left = glyph.bitmap_left();
             let top  = glyph.bitmap_top();
-            if width<=0 || height<=0 { continue }; // invisible character, ignore for rendering
-            let uv = glyph_cache.insert(id, width as u16, height as u16, left as i16, top as i16);
-            ret.quads.push(
-                gen_quad((x+left) as i16,
-                         (y-top)  as i16,
-                         width as i16, height as i16,
-                         uv.0, uv.1,
-                         color));
-            ret.buffer_updates.push(
-                gen_buffer_image_copy(
-                    ret.pixels.len() as u64,
-                    pitch as u32, width as u32, height as u32,
-                    uv.0 as i32,
-                    uv.1 as i32));
-            for b in bitmap.buffer() {
-                ret.pixels.push(*b);
+            if !(width<=0 || height<=0) { 
+                let uv = glyph_cache.insert(GlyphCacheKey{ font_idx, glyph_idx:id, font_size}, 
+                                            width as u16, height as u16, left as i16, top as i16);
+                ret.quads.push(
+                    gen_quad((x+left) as i16,
+                             (y-top)  as i16,
+                             width as i16, height as i16,
+                             uv.0, uv.1,
+                             color));
+                ret.buffer_updates.push(
+                    gen_buffer_image_copy(
+                        ret.pixels.len() as u64,
+                        pitch as u32, width as u32, height as u32,
+                        uv.0 as i32,
+                        uv.1 as i32));
+                for b in bitmap.buffer() {
+                    ret.pixels.push(*b);
+                }
             }
         }
 
@@ -256,8 +292,6 @@ fn render_line_of_text(
         cursor.1 += div_round(pos.y_advance, 64);
     }
 }
-
-////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Default)]
 enum App{
@@ -271,8 +305,8 @@ enum App{
         pipeline_layout : vk::PipelineLayout,
         descriptor_set : vk::DescriptorSet,
         image : vk::Image,
-        ft_face : ft::Face,
-        hb_font : *mut hb::hb_font_t,
+        ft_faces : Vec<ft::Face>,
+        hb_fonts : Vec<*mut hb::hb_font_t>,
         hb_buffer : *mut hb::hb_buffer_t,
     },
 }
@@ -283,12 +317,48 @@ impl ApplicationHandler for App {
             App::Uninitialized => {
                 let freetype_lib  = ft::Library::init().expect("failed to initialize freetype");
 
-                let mut ft_face = freetype_lib.new_face("./source-sans/SourceSans3-Regular.ttf", 0).expect("could not find font");
-                ft_face.set_char_size(0, 48*64, 0, 0);
-                let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face.raw_mut())};
-                unsafe{hb_ft_font_set_funcs(hb_font)};
-                unsafe{hb_ft_font_set_load_flags(hb_font, (ft::face::LoadFlag::FORCE_AUTOHINT).bits())};
+                // let mut ft_face = freetype_lib.new_face("./fonts/source-sans/upright.otf", 0).expect("could not find font");
+                // let mut hb_face = unsafe{ hb_ft_face_create(ft_face.raw_mut(), None) };
+                // let hb_font = unsafe{hb::hb_font_create(hb_face)};
 
+                let mut hb_fonts = vec![];
+                let mut ft_faces = vec![
+                    freetype_lib.new_face("./fonts/source-sans/upright.otf", 0).expect("could not find font"),
+                    freetype_lib.new_face("./fonts/source-sans/italic.otf",  0).expect("could not find font")
+                ];
+                for (ft_face, fontsize) in std::iter::zip(&mut ft_faces,[16,16]) {
+                    ft_face.set_char_size(0, fontsize*64, 0, 0);
+                    let mut amaster : *mut ft::ffi::FT_MM_Var = core::ptr::null_mut();
+                    //let mut var = [0i64, 0, 0, 0]; //500i64<<16;
+                    //unsafe{ft::ffi::FT_Get_MM_Var(ft_face.raw_mut(), core::ptr::addr_of_mut!(amaster))};
+                    //println!("{:?}", unsafe{*amaster});
+
+                    let var = 400<<16;
+                    unsafe{ft::ffi::FT_Set_Var_Design_Coordinates(ft_face.raw_mut(), 1, &var)};
+                    //unsafe{ft::ffi::FT_Set_Var_Blend_Coordinates(ft_face.raw_mut(), 1, core::ptr::addr_of!(var))};
+
+                    let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face.raw_mut())};
+                    //unsafe{hb_ft_font_set_funcs(hb_font)};
+                    unsafe{hb_ft_font_set_load_flags(hb_font, (ft::face::LoadFlag::FORCE_AUTOHINT).bits())};
+                    hb_fonts.push(hb_font);
+                }
+
+                // let mut ft_face2 = ft_face.clone();
+                // ft_face2.set_char_size(0, 24*64, 0, 0);
+                // let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face2.raw_mut())};
+                // unsafe{hb_ft_font_set_funcs(hb_font)};
+                // unsafe{hb_ft_font_set_load_flags(hb_font, (ft::face::LoadFlag::FORCE_AUTOHINT).bits())};
+
+                // let hb_face = unsafe{hb_font_get_face(hb_font)};
+                // let count = unsafe{hb::hb_ot_var_get_axis_count(hb_face)};
+                // let tag_wght = unsafe{ hb::hb_tag_from_string("wght".as_ptr() as *const i8, 4)};
+                // let mut axis_info = unsafe{core::mem::MaybeUninit::<hb::hb_ot_var_axis_info_t>::zeroed().assume_init()};
+                // if unsafe{hb::hb_ot_var_find_axis_info(hb_face, tag_wght, &mut axis_info)} >= 0 {
+                //     let weight =  500.0f32.clamp(axis_info.min_value, axis_info.max_value);
+                //     println!("has weight! {}<={}<={}", axis_info.min_value, weight, axis_info.max_value );
+                //     let weight_data = hb::hb_variation_t{ tag: tag_wght, value: weight };
+                //     unsafe{hb_font_set_variations(hb_font, &weight_data, 1)};
+                // }
 
                 let hb_buffer = unsafe{hb::hb_buffer_create()};
 
@@ -427,7 +497,7 @@ impl ApplicationHandler for App {
                 println!("{:>13?} renderer new", init_render-init_start);
                 println!("{:>13?} post renderer", init_end-init_render);
                 println!("{:>13?} total init", init_end-init_start);
-                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, ft_face, hb_font, hb_buffer};
+                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, ft_faces, hb_fonts, hb_buffer};
             },
         }
     }
@@ -439,7 +509,7 @@ impl ApplicationHandler for App {
                 event_loop.exit()
             },
             WindowEvent::RedrawRequested => {
-                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, ft_face, hb_font, hb_buffer} = self else { panic!("not active!") };
+                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, ft_faces, hb_fonts, hb_buffer} = self else { panic!("not active!") };
                 println!("================================================================================");
                 let winsize = renderer.window.inner_size();
                 let win_w = winsize.width as f32;
@@ -453,7 +523,13 @@ impl ApplicationHandler for App {
                 let mut cursor = (50,50);
                 let mut text = Text::default();
 
-                render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, ft_face, *hb_font, &[], &english, cursor, Color::WHITE, "Hello, 'World'! VAVAVA");
+                render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, &ft_faces, hb_fonts, &[], 0, &english, cursor, Color::WHITE, 48, "Hello, World! 48pt");
+                let mut cursor = (50,50+30);
+                render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, &ft_faces, hb_fonts, &[], 1, &english, cursor, Color::WHITE, 21,
+                    "This is an example of an italic sentence. This is set at 21pts");
+                let mut cursor = (50,50+30*2);
+                render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, &ft_faces, hb_fonts, &[], 0, &english, cursor, Color::WHITE, 16,
+                    "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts.");
                 text.quads.push(gen_quad(50, 200, glyph_cache.current_x as i16, 50, 0, 0, Color{r:0xFF,g:0xFF,b:0x00,a:0xFF})); // debug: visualize glyph_cache
 
                 // copy text into bar memory
