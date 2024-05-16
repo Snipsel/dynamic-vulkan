@@ -189,60 +189,80 @@ fn gen_buffer_image_copy( buffer_offset: u64,
 
 #[derive(Default)]
 struct Text{
-    quads       : Vec<[Vertex;4]>,
+    quads          : Vec<[Vertex;4]>,
     buffer_updates : Vec<vk::BufferImageCopy>,
     pixels         : Vec<u8>,
 }
 
 fn div_round(a:i32, b:i32) -> i32 { (a+(b/2))/b }
 
+struct Style<'a>{
+    font_idx: u32,
+    size:     u32,
+    weight:   u32,
+    color:    Color,
+    features: &'a[hb::hb_feature_t],
+}
+
+struct TextRenderer<'a>{
+    glyph_cache: GlyphCache,
+    buffer:      *mut hb::hb_buffer_t,
+    ft_faces:    &'a mut [ft::Face],
+    hb_fonts:    &'a [*mut hb::hb_font_t],
+}
+
 // Text rendering can fundamentally not be cleanly separated into parts. Everything affects
 // everything else. This means the easiest thing to do is have a monolithic function that does
 // everything. It's better to have a monolithic function as API that can hide language
 // complexities, than have a complex API.
 //
-// This function SHOULD be stateless appart from:
-// - glyph cache
-// - passed-in position
+// the goal of keeping everything as an argument is to keep the statefulness down.
+// The amount of arguments this function takes is a disaster. Possible solutions:
+// - group arguments together into related structs. Candidates:
+//   - combine ft_faces and ft_fonts into a FontLibrary struct?
+//   - maybe combine all "global state" (glyph_cache + buffer + fonts)
+// - provide a "builder-pattern"-like optional-argument wrapper?
 //
 // TODO: add text-layout features like line breaking
 fn render_line_of_text(
         ret:         &mut Text,
-        buffer:      *mut hb::hb_buffer_t,
-        glyph_cache: &mut GlyphCache,
-        ft_faces:    &[ft::Face],
-        hb_fonts:    &[*mut hb::hb_font_t],
-        features:    &[hb::hb_feature_t],
-        font_idx:    u32,
+        renderer:    &mut TextRenderer,
         locale:      &hb::hb_segment_properties_t,
+        style:       &Style,
         start_position: (i32,i32),
-        color:       Color,
-        font_size:   u32,
         text:        &str){
     use hb::*;
     
     // Should hinting and/or subpixel position be turned off for larger font sizes?
     // latin fonts 21pt and up kinda look ok without subpixel position.
-    let subpixel_position_count = 4;
+    let subpixel_position_count = 4; // TODO
 
-    let hb_font =  hb_fonts[font_idx as usize];
-    let ft_face = &ft_faces[font_idx as usize];
-    ft_face.set_char_size(0, (font_size as isize)*64, 0, 0);
+    let hb_font =  renderer.hb_fonts[style.font_idx as usize];
+    let mut ft_face = &mut renderer.ft_faces[style.font_idx as usize];
+    ft_face.set_char_size(0, (style.size as isize)*64, 0, 0);
+
+    // TODO: currently assumes exactly 1 variable axis, and that it corresponds to font-weight
+    // assert that this is the case.
+    // set variable width
+    let mut amaster : *mut ft::ffi::FT_MM_Var = core::ptr::null_mut();
+    let var = (style.weight as i64) <<16;
+    unsafe{ft::ffi::FT_Set_Var_Design_Coordinates(ft_face.raw_mut(), 1, &var)};
+
     unsafe{hb_ft_font_changed(hb_font)};
 
     unsafe{
-        hb_buffer_reset(buffer);
-        hb_buffer_add_utf8(buffer, text.as_ptr() as *const i8, text.len() as i32, 0, -1);
-        hb_buffer_set_segment_properties(buffer, locale);
-        hb_shape(hb_font, buffer, if features.len()==0 {core::ptr::null()} else {features.as_ptr()}, features.len() as u32);
+        hb_buffer_reset(renderer.buffer);
+        hb_buffer_add_utf8(renderer.buffer, text.as_ptr() as *const i8, text.len() as i32, 0, -1);
+        hb_buffer_set_segment_properties(renderer.buffer, locale);
+        hb_shape(hb_font, renderer.buffer, if style.features.len()==0 {core::ptr::null()} else {style.features.as_ptr()}, style.features.len() as u32);
     };
 
     let mut glyph_info_count = 0;
-    let glyph_info_ptr = unsafe{hb_buffer_get_glyph_infos(buffer, &mut glyph_info_count)};
+    let glyph_info_ptr = unsafe{hb_buffer_get_glyph_infos(renderer.buffer, &mut glyph_info_count)};
     let glyph_infos = unsafe{core::slice::from_raw_parts_mut(glyph_info_ptr, glyph_info_count as usize)};
 
     let mut glyph_pos_count = 0;
-    let glyph_pos_ptr = unsafe{hb_buffer_get_glyph_positions(buffer, &mut glyph_pos_count)};
+    let glyph_pos_ptr = unsafe{hb_buffer_get_glyph_positions(renderer.buffer, &mut glyph_pos_count)};
     let glyph_positons = unsafe{core::slice::from_raw_parts_mut(glyph_pos_ptr, glyph_pos_count as usize)};
 
     assert_eq!(glyph_info_count, glyph_pos_count);
@@ -253,7 +273,7 @@ fn render_line_of_text(
         let x = div_round(cursor.0 + pos.x_offset, 64);
         let y = div_round(cursor.1 + pos.y_offset, 64);
 
-        if let Some(entry) = glyph_cache.get(&GlyphCacheKey{font_idx,glyph_idx:id,font_size, subpixel:0}) {
+        if let Some(entry) = renderer.glyph_cache.get(&GlyphCacheKey{font_idx:style.font_idx, glyph_idx:id, font_size:style.size, subpixel:0}) {
             if !(entry.width<=0 || entry.height<=0) { // invisible character, ignore for rendering
                 ret.quads.push(
                     gen_quad(x as i16 + entry.left,
@@ -261,7 +281,7 @@ fn render_line_of_text(
                              entry.width as i16, 
                              entry.height as i16,
                              entry.u, entry.v,
-                             color));
+                             style.color));
             }
         }else{
             ft_face.load_glyph(id, ft::face::LoadFlag::RENDER | ft::face::LoadFlag::FORCE_AUTOHINT);
@@ -273,14 +293,14 @@ fn render_line_of_text(
             let left = glyph.bitmap_left();
             let top  = glyph.bitmap_top();
             if !(width<=0 || height<=0) { 
-                let uv = glyph_cache.insert(GlyphCacheKey{ font_idx, glyph_idx:id, font_size, subpixel:0}, 
+                let uv = renderer.glyph_cache.insert(GlyphCacheKey{ font_idx:style.font_idx, glyph_idx:id, font_size:style.size, subpixel:0}, 
                                             width as u16, height as u16, left as i16, top as i16);
                 ret.quads.push(
                     gen_quad((x+left) as i16,
                              (y-top)  as i16,
                              width as i16, height as i16,
                              uv.0, uv.1,
-                             color));
+                             style.color));
                 ret.buffer_updates.push(
                     gen_buffer_image_copy(
                         ret.pixels.len() as u64,
@@ -334,16 +354,6 @@ impl ApplicationHandler for App {
                     freetype_lib.new_face("./fonts/crimson-pro/italic.ttf",  0).expect("could not find font"),
                 ];
                 for ft_face in &mut ft_faces {
-                    ft_face.set_char_size(0, 16*64, 0, 0);
-                    let mut amaster : *mut ft::ffi::FT_MM_Var = core::ptr::null_mut();
-                    //let mut var = [0i64, 0, 0, 0]; //500i64<<16;
-                    //unsafe{ft::ffi::FT_Get_MM_Var(ft_face.raw_mut(), core::ptr::addr_of_mut!(amaster))};
-                    //println!("{:?}", unsafe{*amaster});
-
-                    let var = 400<<16;
-                    unsafe{ft::ffi::FT_Set_Var_Design_Coordinates(ft_face.raw_mut(), 1, &var)};
-                    //unsafe{ft::ffi::FT_Set_Var_Blend_Coordinates(ft_face.raw_mut(), 1, core::ptr::addr_of!(var))};
-
                     let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face.raw_mut())};
                     //unsafe{hb_ft_font_set_funcs(hb_font)};
                     unsafe{hb_ft_font_set_load_flags(hb_font, (ft::face::LoadFlag::FORCE_AUTOHINT).bits())};
@@ -516,7 +526,7 @@ impl ApplicationHandler for App {
                 event_loop.exit()
             },
             WindowEvent::RedrawRequested => {
-                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, ft_faces, hb_fonts, hb_buffer} = self else { panic!("not active!") };
+                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, ref mut ft_faces, hb_fonts, hb_buffer} = self else { panic!("not active!") };
                 println!("================================================================================");
                 let winsize = renderer.window.inner_size();
                 let win_w = winsize.width as f32;
@@ -525,20 +535,32 @@ impl ApplicationHandler for App {
 
                 let mut frame = renderer.wait_for_frame();
 
+
+                let mut text_renderer = TextRenderer{
+                    buffer: *hb_buffer,
+                    ft_faces, hb_fonts,
+                    glyph_cache: GlyphCache::new(),
+                };
                 let english = new_locale("en", hb::HB_SCRIPT_LATIN, hb::HB_DIRECTION_LTR);
-                let mut glyph_cache = GlyphCache::new();
-                let mut cursor = (50*64,50*64);
                 let mut text = Text::default();
 
-                render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, &ft_faces, hb_fonts, &[], 0, &english, cursor, Color::WHITE, 48,
-                    "Hello, World! 48pt");
+                let style_h1 = Style{ color: Color::WHITE, features: &[], font_idx: 0, size: 48, weight: 300 };
+                let style_s1 = Style{ color: Color::WHITE, features: &[], font_idx: 1, size: 21, weight: 400 };
+                let style_s2 = Style{ color: Color::WHITE, features: &[], font_idx: 0, size: 16, weight: 400 };
+                let style_s3 = Style{ color: Color::WHITE, features: &[], font_idx: 2, size: 21, weight: 300 };
+                let style_h2 = Style{ color: Color::WHITE, features: &[], font_idx: 3, size: 48, weight: 250 };
+
+                let mut cursor = (50*64,50*64);
+                render_line_of_text(&mut text, &mut text_renderer, &english, &style_h1, cursor, "Hello, World! 48pt");
                 let mut cursor = (50*64,(50+30)*64);
-                render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, &ft_faces, hb_fonts, &[], 1, &english, cursor, Color::WHITE, 21,
-                    "This is an example of an italic sentence. This is set at 21pts");
+                render_line_of_text(&mut text, &mut text_renderer, &english, &style_s1, cursor, "This is an example of an italic sentence. This is set at 21pts");
                 let mut cursor = (50*64,(50+30*2)*64);
-                render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, &ft_faces, hb_fonts, &[], 0, &english, cursor, Color::WHITE, 16,
-                    "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts.");
-                text.quads.push(gen_quad(50, 200, glyph_cache.current_x as i16, 50, 0, 0, Color{r:0xFF,g:0xFF,b:0x00,a:0xFF})); // debug: visualize glyph_cache
+                render_line_of_text(&mut text, &mut text_renderer, &english, &style_s2, cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts.");
+                let mut cursor = (50*64,(50+30*2+40)*64);
+                render_line_of_text(&mut text, &mut text_renderer, &english, &style_s3, cursor, "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font.");
+                let mut cursor = (50*64,(50+30*2+40+50)*64);
+                render_line_of_text(&mut text, &mut text_renderer, &english, &style_h2, cursor, "And it has absolutely kick-ass italics.");
+                text.quads.push(gen_quad(50, 300, text_renderer.glyph_cache.current_x as i16, 50, 0, 0, Color{r:0xFF,g:0xFF,b:0x00,a:0xFF})); // debug: visualize glyph_cache
 
                 // copy text into bar memory
                 let mut bar_ptr = *bar_memory;
