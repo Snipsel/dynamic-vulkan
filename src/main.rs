@@ -204,11 +204,11 @@ struct Style<'a>{
     features: &'a[hb::hb_feature_t],
 }
 
-struct TextRenderer<'a>{
+struct TextRenderer{
     glyph_cache: GlyphCache,
     buffer:      *mut hb::hb_buffer_t,
-    ft_faces:    &'a mut [ft::Face],
-    hb_fonts:    &'a [*mut hb::hb_font_t],
+    ft_faces:    Vec<ft::Face>,
+    hb_fonts:    Vec<*mut hb::hb_font_t>,
 }
 
 // Text rendering can fundamentally not be cleanly separated into parts. Everything affects
@@ -330,9 +330,7 @@ enum App{
         pipeline_layout : vk::PipelineLayout,
         descriptor_set : vk::DescriptorSet,
         image : vk::Image,
-        ft_faces : Vec<ft::Face>,
-        hb_fonts : Vec<*mut hb::hb_font_t>,
-        hb_buffer : *mut hb::hb_buffer_t,
+        text_renderer : TextRenderer,
     },
 }
 impl ApplicationHandler for App {
@@ -360,6 +358,13 @@ impl ApplicationHandler for App {
                     hb_fonts.push(hb_font);
                 }
 
+                let mut text_renderer = TextRenderer{
+                    buffer: unsafe{hb::hb_buffer_create()},
+                    ft_faces, hb_fonts,
+                    glyph_cache: GlyphCache::new(),
+                };
+
+
                 // let mut ft_face2 = ft_face.clone();
                 // ft_face2.set_char_size(0, 24*64, 0, 0);
                 // let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face2.raw_mut())};
@@ -376,8 +381,6 @@ impl ApplicationHandler for App {
                 //     let weight_data = hb::hb_variation_t{ tag: tag_wght, value: weight };
                 //     unsafe{hb_font_set_variations(hb_font, &weight_data, 1)};
                 // }
-
-                let hb_buffer = unsafe{hb::hb_buffer_create()};
 
                 let init_start = std::time::Instant::now();
                 let renderer = renderer::Renderer::new(event_loop);
@@ -514,7 +517,7 @@ impl ApplicationHandler for App {
                 println!("{:>13?} renderer new", init_render-init_start);
                 println!("{:>13?} post renderer", init_end-init_render);
                 println!("{:>13?} total init", init_end-init_start);
-                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, ft_faces, hb_fonts, hb_buffer};
+                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, text_renderer};
             },
         }
     }
@@ -526,7 +529,7 @@ impl ApplicationHandler for App {
                 event_loop.exit()
             },
             WindowEvent::RedrawRequested => {
-                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, ref mut ft_faces, hb_fonts, hb_buffer} = self else { panic!("not active!") };
+                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, text_renderer} = self else { panic!("not active!") };
                 println!("================================================================================");
                 let winsize = renderer.window.inner_size();
                 let win_w = winsize.width as f32;
@@ -536,11 +539,6 @@ impl ApplicationHandler for App {
                 let mut frame = renderer.wait_for_frame();
 
 
-                let mut text_renderer = TextRenderer{
-                    buffer: *hb_buffer,
-                    ft_faces, hb_fonts,
-                    glyph_cache: GlyphCache::new(),
-                };
                 let english = new_locale("en", hb::HB_SCRIPT_LATIN, hb::HB_DIRECTION_LTR);
                 let mut text = Text::default();
 
@@ -551,15 +549,15 @@ impl ApplicationHandler for App {
                 let style_h2 = Style{ color: Color::WHITE, features: &[], font_idx: 3, size: 48, weight: 250 };
 
                 let mut cursor = (50*64,50*64);
-                render_line_of_text(&mut text, &mut text_renderer, &english, &style_h1, cursor, "Hello, World! 48pt");
+                render_line_of_text(&mut text, text_renderer, &english, &style_h1, cursor, "Hello, World! 48pt");
                 let mut cursor = (50*64,(50+30)*64);
-                render_line_of_text(&mut text, &mut text_renderer, &english, &style_s1, cursor, "This is an example of an italic sentence. This is set at 21pts");
+                render_line_of_text(&mut text, text_renderer, &english, &style_s1, cursor, "This is an example of an italic sentence. This is set at 21pts");
                 let mut cursor = (50*64,(50+30*2)*64);
-                render_line_of_text(&mut text, &mut text_renderer, &english, &style_s2, cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts.");
+                render_line_of_text(&mut text, text_renderer, &english, &style_s2, cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts.");
                 let mut cursor = (50*64,(50+30*2+40)*64);
-                render_line_of_text(&mut text, &mut text_renderer, &english, &style_s3, cursor, "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font.");
+                render_line_of_text(&mut text, text_renderer, &english, &style_s3, cursor, "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font.");
                 let mut cursor = (50*64,(50+30*2+40+50)*64);
-                render_line_of_text(&mut text, &mut text_renderer, &english, &style_h2, cursor, "And it has absolutely kick-ass italics.");
+                render_line_of_text(&mut text, text_renderer, &english, &style_h2, cursor, "And it has absolutely kick-ass italics.");
                 text.quads.push(gen_quad(50, 300, text_renderer.glyph_cache.current_x as i16, 50, 0, 0, Color{r:0xFF,g:0xFF,b:0x00,a:0xFF})); // debug: visualize glyph_cache
 
                 // copy text into bar memory
