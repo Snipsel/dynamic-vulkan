@@ -143,6 +143,7 @@ struct GlyphCacheKey{
     font_idx  : u32,
     glyph_idx : u32,
     font_size : u32,
+    subpixel  : u32,
 }
 
 struct GlyphCache{
@@ -219,6 +220,10 @@ fn render_line_of_text(
         font_size:   u32,
         text:        &str){
     use hb::*;
+    
+    // Should hinting and/or subpixel position be turned off for larger font sizes?
+    // latin fonts 21pt and up kinda look ok without subpixel position.
+    let subpixel_position_count = 4;
 
     let hb_font =  hb_fonts[font_idx as usize];
     let ft_face = &ft_faces[font_idx as usize];
@@ -245,10 +250,10 @@ fn render_line_of_text(
     let mut cursor = start_position;
     for (info,pos) in std::iter::zip(glyph_infos, glyph_positons) {
         let id = info.codepoint; // actually glyph index, not codepoint
-        let x = cursor.0 + div_round(pos.x_offset, 64);
-        let y = cursor.1 + div_round(pos.y_offset, 64);
+        let x = div_round(cursor.0 + pos.x_offset, 64);
+        let y = div_round(cursor.1 + pos.y_offset, 64);
 
-        if let Some(entry) = glyph_cache.get(&GlyphCacheKey{font_idx,glyph_idx:id,font_size}) {
+        if let Some(entry) = glyph_cache.get(&GlyphCacheKey{font_idx,glyph_idx:id,font_size, subpixel:0}) {
             if !(entry.width<=0 || entry.height<=0) { // invisible character, ignore for rendering
                 ret.quads.push(
                     gen_quad(x as i16 + entry.left,
@@ -268,7 +273,7 @@ fn render_line_of_text(
             let left = glyph.bitmap_left();
             let top  = glyph.bitmap_top();
             if !(width<=0 || height<=0) { 
-                let uv = glyph_cache.insert(GlyphCacheKey{ font_idx, glyph_idx:id, font_size}, 
+                let uv = glyph_cache.insert(GlyphCacheKey{ font_idx, glyph_idx:id, font_size, subpixel:0}, 
                                             width as u16, height as u16, left as i16, top as i16);
                 ret.quads.push(
                     gen_quad((x+left) as i16,
@@ -288,8 +293,8 @@ fn render_line_of_text(
             }
         }
 
-        cursor.0 += div_round(pos.x_advance, 64);
-        cursor.1 += div_round(pos.y_advance, 64);
+        cursor.0 += pos.x_advance;
+        cursor.1 += pos.y_advance;
     }
 }
 
@@ -323,11 +328,13 @@ impl ApplicationHandler for App {
 
                 let mut hb_fonts = vec![];
                 let mut ft_faces = vec![
-                    freetype_lib.new_face("./fonts/source-sans/upright.otf", 0).expect("could not find font"),
-                    freetype_lib.new_face("./fonts/source-sans/italic.otf",  0).expect("could not find font")
+                    freetype_lib.new_face("./fonts/source-sans/upright.ttf", 0).expect("could not find font"),
+                    freetype_lib.new_face("./fonts/source-sans/italic.ttf",  0).expect("could not find font"),
+                    freetype_lib.new_face("./fonts/crimson-pro/upright.ttf", 0).expect("could not find font"),
+                    freetype_lib.new_face("./fonts/crimson-pro/italic.ttf",  0).expect("could not find font"),
                 ];
-                for (ft_face, fontsize) in std::iter::zip(&mut ft_faces,[16,16]) {
-                    ft_face.set_char_size(0, fontsize*64, 0, 0);
+                for ft_face in &mut ft_faces {
+                    ft_face.set_char_size(0, 16*64, 0, 0);
                     let mut amaster : *mut ft::ffi::FT_MM_Var = core::ptr::null_mut();
                     //let mut var = [0i64, 0, 0, 0]; //500i64<<16;
                     //unsafe{ft::ffi::FT_Get_MM_Var(ft_face.raw_mut(), core::ptr::addr_of_mut!(amaster))};
@@ -520,14 +527,15 @@ impl ApplicationHandler for App {
 
                 let english = new_locale("en", hb::HB_SCRIPT_LATIN, hb::HB_DIRECTION_LTR);
                 let mut glyph_cache = GlyphCache::new();
-                let mut cursor = (50,50);
+                let mut cursor = (50*64,50*64);
                 let mut text = Text::default();
 
-                render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, &ft_faces, hb_fonts, &[], 0, &english, cursor, Color::WHITE, 48, "Hello, World! 48pt");
-                let mut cursor = (50,50+30);
+                render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, &ft_faces, hb_fonts, &[], 0, &english, cursor, Color::WHITE, 48,
+                    "Hello, World! 48pt");
+                let mut cursor = (50*64,(50+30)*64);
                 render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, &ft_faces, hb_fonts, &[], 1, &english, cursor, Color::WHITE, 21,
                     "This is an example of an italic sentence. This is set at 21pts");
-                let mut cursor = (50,50+30*2);
+                let mut cursor = (50*64,(50+30*2)*64);
                 render_line_of_text(&mut text, *hb_buffer, &mut glyph_cache, &ft_faces, hb_fonts, &[], 0, &english, cursor, Color::WHITE, 16,
                     "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts.");
                 text.quads.push(gen_quad(50, 200, glyph_cache.current_x as i16, 50, 0, 0, Color{r:0xFF,g:0xFF,b:0x00,a:0xFF})); // debug: visualize glyph_cache
