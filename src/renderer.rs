@@ -220,7 +220,10 @@ impl Renderer {
             .descriptor_binding_storage_buffer_update_after_bind(true);
         let mut feature_shader_object     = vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
         let mut feature_dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
+        let default_features = vk::PhysicalDeviceFeatures::default()
+            .dual_src_blend(true);
         let device_info = vk::DeviceCreateInfo::default()
+            .enabled_features(&default_features)
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&required_device_extensions)
             .push_next(&mut feature_shader_object)

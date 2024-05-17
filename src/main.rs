@@ -570,18 +570,22 @@ impl ApplicationHandler for App {
                 let english = new_locale("en", hb::HB_SCRIPT_LATIN, hb::HB_DIRECTION_LTR);
                 let mut text = Text::default();
 
-                let color = Color::WHITE;
+                let gb_light = Color{r:0xF2, g:0xe5, b:0xbc, a:0xFF };
+                let gb_aqua  = Color{r:0x8e, g:0xc0, b:0x7c, a:0xFF };
+                let gb_red   = Color{r:0xfb, g:0x49, b:0x34, a:0xFF };
+                let gb_yellow= Color{r:0xfa, g:0xbd, b:0x2f, a:0xFF };
+                let color = gb_aqua;
                 let features = &[];
                 let subpixel = 8;
-                let style_h1  = Style{ features, color, subpixel,   autohint: false, font_idx: 0, size: 48, weight: 300 };
+                let style_h1  = Style{ features, color:gb_light, subpixel,   autohint: false, font_idx: 0, size: 48, weight: 300 };
                 let style_s1  = Style{ features, color, subpixel,   autohint: false, font_idx: 1, size: 21, weight: 400 };
 
-                let style_s2  = Style{ features, color, subpixel,   autohint: false, font_idx: 0, size: 16, weight: 400 };
-                let style_s2s = Style{ features, color, subpixel:1, autohint: false, font_idx: 0, size: 16, weight: 400 };
-                let style_s2h = Style{ features, color, subpixel,   autohint: true,  font_idx: 0, size: 16, weight: 400 };
+                let style_s2  = Style{ features, color:gb_red, subpixel,   autohint: false, font_idx: 0, size: 16, weight: 400 };
+                let style_s2s = Style{ features, color:gb_red, subpixel:1, autohint: false, font_idx: 0, size: 16, weight: 400 };
+                let style_s2h = Style{ features, color:gb_red, subpixel,   autohint: true,  font_idx: 0, size: 16, weight: 400 };
 
-                let style_s3  = Style{ features, color, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 300 };
-                let style_h2  = Style{ features, color, subpixel,   autohint: false, font_idx: 3, size: 48, weight: 250 };
+                let style_s3  = Style{ features, color:gb_yellow, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 300 };
+                let style_h2  = Style{ features, color:gb_light, subpixel,   autohint: false, font_idx: 3, size: 48, weight: 250 };
 
                 let mut cursor = vec2(50,50)*64;
                 render_line_of_text(&mut text, text_renderer, &english, &style_h1, cursor, "Hello, World! 48pt");
@@ -598,7 +602,7 @@ impl ApplicationHandler for App {
                 cursor.1 += 50*64;
                 render_line_of_text(&mut text, text_renderer, &english, &style_h2, cursor, "And it has absolutely kick-ass italics.");
                 cursor.1 += 20*64;
-                text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_renderer.glyph_cache.current_x as i16, 50, 0, 0, Color{r:0xFF,g:0xFF,b:0x00,a:0xFF})); // debug: visualize glyph_cache
+                text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_renderer.glyph_cache.current_x as i16, 50, 0, 0, gb_yellow)); // debug: visualize glyph_cache
 
                 // copy text into bar memory
                 let mut bar_ptr = *bar_memory;
@@ -632,7 +636,10 @@ impl ApplicationHandler for App {
 
                 frame.buffer_to_image(*bar_buffer, *image, &text.buffer_updates);
 
-                frame.begin_rendering([0.0, 0.0, 0.0, 1.0]);
+                frame.begin_rendering([(0x32 as f32/0xFF as f32).powf(2.2),
+                                       (0x30 as f32/0xFF as f32).powf(2.2),
+                                       (0x2f as f32/0xFF as f32).powf(2.2),
+                                       1.0]);
                 frame.bind_vs_fs(*vs, *fs);
                 frame.bind_vertex_buffer(*bar_buffer);
                 frame.bind_index_buffer(*bar_buffer, index_buffer_offset);
@@ -643,12 +650,24 @@ impl ApplicationHandler for App {
                 ]);
 
                 frame.set_color_blend_enable(&[1]);
-                frame.set_color_blend_equation(&[
+                /* frame.set_color_blend_equation(&[
                     vk::ColorBlendEquationEXT::default()
                         .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
                         .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
                         .color_blend_op(vk::BlendOp::ADD)
                         .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                        .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+                        .alpha_blend_op(vk::BlendOp::ADD)
+                ]); */
+
+                // component-alpha blending
+                frame.set_color_blend_equation(&[
+                    vk::ColorBlendEquationEXT::default()
+                        .src_color_blend_factor(vk::BlendFactor::SRC1_COLOR)
+                        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC1_COLOR)
+                        .color_blend_op(vk::BlendOp::ADD)
+                        // ignore alpha component
+                        .src_alpha_blend_factor(vk::BlendFactor::ZERO)
                         .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
                         .alpha_blend_op(vk::BlendOp::ADD)
                 ]);
