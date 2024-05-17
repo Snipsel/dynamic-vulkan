@@ -555,10 +555,10 @@ impl<'a> Frame<'a> {
     }
 
 
-    pub fn begin_rendering(&self) {
+    pub fn begin_rendering(&self, color: [f32;4]) {
         // begin rendering
         let mut clear_color_value = vk::ClearColorValue::default();
-        clear_color_value.float32 = [0.0, 0.5, 0.5, 1.0];
+        clear_color_value.float32 = color; 
         let mut clear_color = vk::ClearValue::default();
         clear_color.color = clear_color_value;
         let color_attachments = [

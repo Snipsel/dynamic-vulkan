@@ -71,7 +71,7 @@ fn end_oneshot_cmd(renderer: &renderer::Renderer, cmdbuf : vk::CommandBuffer){
 }
 
 // TODO: think about colors. Right now Color means sRGBA8
-// maybe have oklab colors internally and use .srgba8() to convert
+// maybe have f32 oklab colors internally and use .srgba8() to convert?
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct Color{
@@ -215,6 +215,7 @@ struct Style<'a>{
     weight:   u32,
     color:    Color,
     autohint: bool,
+    subpixel: i32,
     features: &'a[hb::hb_feature_t],
 }
 
@@ -239,11 +240,9 @@ fn render_line_of_text(
         start_position: vec2<i32>,
         text:        &str){
     use hb::*;
+    assert!(style.subpixel>=1);
+    assert!(style.subpixel<=64);
 
-    const SUBPIXEL_BITS :i32 = 3;
-    const SUBPIXEL_MASK :i32 = ((1<<SUBPIXEL_BITS)-1);
-    const SUBPIXEL_INV  :i32 = 6-SUBPIXEL_BITS;
-    
     let hb_font =  renderer.hb_fonts[style.font_idx as usize];
     let mut ft_face = &mut renderer.ft_faces[style.font_idx as usize];
     ft_face.set_char_size(0, (style.size as isize)*64, 0, 0);
@@ -278,13 +277,15 @@ fn render_line_of_text(
     let mut cursor = start_position;
     for (info,pos) in std::iter::zip(glyph_infos, glyph_positons) {
         let id = info.codepoint; // actually glyph index, not codepoint
-        let x = div_round(cursor.0 + pos.x_offset, 64>>SUBPIXEL_BITS);
-        let y = div_round(cursor.1 + pos.y_offset, 64);
-        let x_frac = x&SUBPIXEL_MASK;
-        let x = x>>SUBPIXEL_BITS;
-        println!("{x:4}.{x_frac:01}");
+        let x = div_round((cursor.0 + pos.x_offset)*style.subpixel, 64);
+        let y = div_round((cursor.1 + pos.y_offset), 64);
+        let x_frac = x%style.subpixel;
+        let x = x/style.subpixel;
 
-        if let Some(entry) = renderer.glyph_cache.get(&GlyphCacheKey{font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:x_frac as u32}) {
+        let frac64 = (x_frac*64/style.subpixel) as u32;
+        //println!("{x:4}+{x_frac:2}/{style.subpixel:2} = {frac64:2}/64");
+
+        if let Some(entry) = renderer.glyph_cache.get(&GlyphCacheKey{font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}) {
             if !(entry.width<=0 || entry.height<=0) { // invisible character, ignore for rendering
                 ret.quads.push(
                     gen_quad(x as i16 + entry.left,
@@ -296,7 +297,7 @@ fn render_line_of_text(
             }
         }else{
             ft_face.load_glyph(id, load_flags);
-            let subpixel_offset = Some(ft::Vector{x:(x_frac<<SUBPIXEL_INV)as i64, y:0});
+            let subpixel_offset = Some(ft::Vector{x:frac64 as i64, y:0});
             let glyph  = ft_face.glyph().get_glyph().unwrap().to_bitmap(ft::render_mode::RenderMode::Normal, subpixel_offset).unwrap();
             let bitmap = glyph.bitmap();
             let width  = bitmap.width();
@@ -305,7 +306,7 @@ fn render_line_of_text(
             let left   = glyph.left();
             let top    = glyph.top();
             if !(width<=0 || height<=0) { 
-                let uv = renderer.glyph_cache.insert( GlyphCacheKey{ font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:x_frac as u32}, 
+                let uv = renderer.glyph_cache.insert( GlyphCacheKey{ font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}, 
                                                       width as u16, height as u16, left as i16, top as i16);
                 ret.quads.push(
                     gen_quad((x+left) as i16,
@@ -553,26 +554,35 @@ impl ApplicationHandler for App {
                 let english = new_locale("en", hb::HB_SCRIPT_LATIN, hb::HB_DIRECTION_LTR);
                 let mut text = Text::default();
 
-                let style_h1  = Style{ color: Color::WHITE, autohint: false, features: &[], font_idx: 0, size: 48, weight: 300 };
-                let style_s1  = Style{ color: Color::WHITE, autohint: false, features: &[], font_idx: 1, size: 21, weight: 400 };
-                let style_s2  = Style{ color: Color::WHITE, autohint: false, features: &[], font_idx: 0, size: 16, weight: 400 };
-                let style_s2h = Style{ color: Color::WHITE, autohint: true,  features: &[], font_idx: 0, size: 16, weight: 400 };
-                let style_s3  = Style{ color: Color::WHITE, autohint: false, features: &[], font_idx: 2, size: 21, weight: 300 };
-                let style_h2  = Style{ color: Color::WHITE, autohint: false, features: &[], font_idx: 3, size: 48, weight: 250 };
+                let color = Color::WHITE;
+                let features = &[];
+                let subpixel = 8;
+                let style_h1  = Style{ features, color, subpixel,   autohint: false, font_idx: 0, size: 48, weight: 300 };
+                let style_s1  = Style{ features, color, subpixel,   autohint: false, font_idx: 1, size: 21, weight: 400 };
+
+                let style_s2  = Style{ features, color, subpixel,   autohint: false, font_idx: 0, size: 16, weight: 400 };
+                let style_s2s = Style{ features, color, subpixel:1, autohint: false, font_idx: 0, size: 16, weight: 400 };
+                let style_s2h = Style{ features, color, subpixel,   autohint: true,  font_idx: 0, size: 16, weight: 400 };
+
+                let style_s3  = Style{ features, color, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 300 };
+                let style_h2  = Style{ features, color, subpixel,   autohint: false, font_idx: 3, size: 48, weight: 250 };
 
                 let mut cursor = vec2(50,50)*64;
                 render_line_of_text(&mut text, text_renderer, &english, &style_h1, cursor, "Hello, World! 48pt");
                 cursor.1 += 30*64;
                 render_line_of_text(&mut text, text_renderer, &english, &style_s1, cursor, "This is an example of an italic sentence. This is set at 21pts");
                 cursor.1 += 30*64;
-                render_line_of_text(&mut text, text_renderer, &english, &style_s2, cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts.");
+                render_line_of_text(&mut text, text_renderer, &english, &style_s2h,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts. A");
                 cursor.1 += 20*64;
-                render_line_of_text(&mut text, text_renderer, &english, &style_s2h,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts.");
+                render_line_of_text(&mut text, text_renderer, &english, &style_s2, cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts. B");
+                cursor.1 += 20*64;
+                render_line_of_text(&mut text, text_renderer, &english, &style_s2s,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts. C");
                 cursor.1 += 30*64;
                 render_line_of_text(&mut text, text_renderer, &english, &style_s3, cursor, "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font.");
                 cursor.1 += 50*64;
                 render_line_of_text(&mut text, text_renderer, &english, &style_h2, cursor, "And it has absolutely kick-ass italics.");
-                text.quads.push(gen_quad(50, 300, text_renderer.glyph_cache.current_x as i16, 50, 0, 0, Color{r:0xFF,g:0xFF,b:0x00,a:0xFF})); // debug: visualize glyph_cache
+                cursor.1 += 20*64;
+                text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_renderer.glyph_cache.current_x as i16, 50, 0, 0, Color{r:0xFF,g:0xFF,b:0x00,a:0xFF})); // debug: visualize glyph_cache
 
                 // copy text into bar memory
                 let mut bar_ptr = *bar_memory;
@@ -601,7 +611,7 @@ impl ApplicationHandler for App {
 
                 frame.buffer_to_image(*bar_buffer, *image, &text.buffer_updates);
 
-                frame.begin_rendering();
+                frame.begin_rendering([0.0, 0.0, 0.0, 1.0]);
                 frame.bind_vs_fs(*vs, *fs);
                 frame.bind_vertex_buffer(*bar_buffer);
                 frame.bind_index_buffer(*bar_buffer, index_buffer_offset);
