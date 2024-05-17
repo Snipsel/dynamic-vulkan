@@ -318,6 +318,7 @@ dependencies = [
  "bitflags 2.5.0",
  "freetype-rs",
  "harfbuzz-sys",
+ "raw-window-handle",
  "shaderc",
  "winit",
 ]

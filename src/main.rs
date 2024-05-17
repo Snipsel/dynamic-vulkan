@@ -8,6 +8,7 @@ use text_engine::*;
 use std::{
     collections::HashMap, ffi::{CStr,OsStr}, fmt, mem::size_of, ptr
 };
+use ash::vk;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -15,10 +16,6 @@ use winit::{
     raw_window_handle::{HasDisplayHandle, HasWindowHandle},
     window::{Window,WindowId}
 };
-use ash::{
-     ext, khr, vk::{self, CommandBuffer, CommandPool, Fence, Handle, Image, ImageView, InstanceCreateInfo, PhysicalDevice, Queue, Semaphore, ShaderEXT, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, WriteDescriptorSet}, Device, Entry, Instance
-};
-use bitflags::bitflags;
 
 fn gen_buffer_image_copy(ptr_offset:u64, buffer_image_copy: BufferImageCopy) -> vk::BufferImageCopy {
     let BufferImageCopy { buffer_offset, width, height, u, v } = buffer_image_copy;
@@ -80,9 +77,10 @@ fn push_quad_indices(ptr:*mut core::ffi::c_void, i:u16) -> *mut core::ffi::c_voi
 enum App{
     #[default] Uninitialized,
     Resumed{
+        window: Window,
         renderer: renderer::Renderer,
-        vs : ShaderEXT,
-        fs : ShaderEXT,
+        vs : vk::ShaderEXT,
+        fs : vk::ShaderEXT,
         bar_buffer : vk::Buffer,
         bar_memory : *mut core::ffi::c_void,
         pipeline_layout : vk::PipelineLayout,
@@ -107,7 +105,11 @@ impl ApplicationHandler for App {
                 ]);
 
                 let init_start = std::time::Instant::now();
-                let renderer = renderer::Renderer::new(event_loop);
+
+                let window = event_loop.create_window(Window::default_attributes()).expect("could not create window");
+                let raw_window  = window.window_handle().unwrap().as_raw();
+                let raw_display = window.display_handle().unwrap().as_raw();
+                let renderer = renderer::Renderer::new(raw_window, raw_display);
                 let init_render = std::time::Instant::now();
 
                 renderer.debug_print();
@@ -241,7 +243,7 @@ impl ApplicationHandler for App {
                 println!("{:>13?} renderer new", init_render-init_start);
                 println!("{:>13?} post renderer", init_end-init_render);
                 println!("{:>13?} total init", init_end-init_start);
-                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, text_engine};
+                *self = App::Resumed{ window, renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, text_engine};
             },
         }
     }
@@ -253,15 +255,13 @@ impl ApplicationHandler for App {
                 event_loop.exit()
             },
             WindowEvent::RedrawRequested => {
-                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, text_engine} = self else { panic!("not active!") };
+                let App::Resumed{window, renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, text_engine} = self else { panic!("not active!") };
                 println!("================================================================================");
-                let winsize = renderer.window.inner_size();
+                let winsize = window.inner_size();
                 let win_w = winsize.width as f32;
                 let win_h = winsize.height as f32;
 
-
                 let mut frame = renderer.wait_for_frame();
-
 
                 let english = Locale::new("en", Script::LATIN, Direction::LeftToRight);
                 let mut text = Text::default();
@@ -370,6 +370,9 @@ impl ApplicationHandler for App {
                 frame.bind_descriptor_set(*descriptor_set, *pipeline_layout);
                 frame.push_constant(*pipeline_layout, &[2.0/win_w, 2.0/win_h, win_w/2.0, win_h/2.0]);
                 frame.draw_indexed((quad_count*6) as u32, 0, 0);
+                if !frame.end_frame() {
+                    window.request_redraw();
+                }
             },
             _ => (),
         }

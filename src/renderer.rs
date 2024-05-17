@@ -1,16 +1,10 @@
+use core::mem::size_of;
 use std::{
     collections::HashSet, 
     fmt,
     ffi::{CStr,OsStr}
 };
-use core::mem::size_of;
-use winit::{
-    application::ApplicationHandler,
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    raw_window_handle::{HasDisplayHandle, HasWindowHandle},
-    window::{Window,WindowId}
-};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle, RawDisplayHandle};
 use ash::{
      ext, khr, vk::{self, CommandBuffer, CommandPool, Fence, Handle, Image, ImageView, InstanceCreateInfo, PhysicalDevice, Queue, Semaphore, ShaderEXT, SurfaceCapabilitiesKHR, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, Extent2D, PhysicalDeviceMemoryProperties}, Device, Entry, Instance
 };
@@ -28,7 +22,8 @@ fn pretty_print_path<P:?Sized+AsRef<std::path::Path>>(path:&P) -> String {
 
 
 pub struct Renderer{
-    pub window:   Window,
+    pub raw_window:  RawWindowHandle,
+    pub raw_display: RawDisplayHandle,
     pub entry:    Entry,
     pub instance: Instance,
     pub gpu:      PhysicalDevice,
@@ -59,14 +54,10 @@ pub struct Renderer{
 
 impl Renderer {
     // TODO: remove dependencie on winit, use raw window/display handles instead
-    fn platform_specific_init(entry: &Entry, window: &Window, mut extensions: Vec<&CStr>) -> (Instance, SurfaceKHR) {
-        use winit::raw_window_handle::RawWindowHandle  as raw_win;
-        use winit::raw_window_handle::RawDisplayHandle as raw_dpy;
+    fn platform_specific_init(entry: &Entry, raw_window:RawWindowHandle, raw_display:RawDisplayHandle, mut extensions: Vec<&CStr>) -> (Instance, SurfaceKHR) {
         let layers = [c"VK_LAYER_KHRONOS_validation".as_ptr()];
-        let raw_window = window.window_handle().unwrap().as_raw();
-        let raw_display = window.display_handle().unwrap().as_raw();
         match (raw_window, raw_display) {
-            (raw_win::Xlib(win), raw_dpy::Xlib(dpy)) => {
+            (RawWindowHandle::Xlib(win), RawDisplayHandle::Xlib(dpy)) => {
                 extensions.push(khr::xlib_surface::NAME);
                 let extensions: Vec<*const i8> = extensions.iter().map(|x| x.as_ptr()).collect();
                 let instance_info = InstanceCreateInfo::default()
@@ -85,17 +76,17 @@ impl Renderer {
         }
     }
 
-    fn create_swapchain(window:&Window, gpu:&PhysicalDevice, device:&Device, khr_swapchain: &khr::swapchain::Device, khr_surface: &khr::surface::Instance, surface: SurfaceKHR, surface_format:SurfaceFormatKHR)
+    fn create_swapchain(gpu:&PhysicalDevice, device:&Device, khr_swapchain: &khr::swapchain::Device, khr_surface: &khr::surface::Instance, surface: SurfaceKHR, surface_format:SurfaceFormatKHR)
             -> (SwapchainKHR, Vec<Image>, Vec<ImageView>, Extent2D) {
+        let default_size = Extent2D{width: 1280, height:720}; // TODO: derive from Display
         let capabilities = unsafe{khr_surface.get_physical_device_surface_capabilities(*gpu, surface)}.unwrap();
         let swapchain_extent = match capabilities.current_extent {
             Extent2D{width:u32::MAX, height:u32::MAX} => {
-                let size = window.inner_size();
                 let min = capabilities.max_image_extent;
                 let max = capabilities.max_image_extent;
                 vk::Extent2D{
-                    width:  size.width.clamp(min.width, max.width),
-                    height: size.height.clamp(min.height, max.height),
+                    width:  default_size.width.clamp(min.width, max.width),
+                    height: default_size.height.clamp(min.height, max.height),
                 }
             },
             x => x,
@@ -138,18 +129,17 @@ impl Renderer {
     }
     fn recreate_swapchain(&mut self){
         self.destroy_swapchain();
-        let (swapchain, swapchain_images, swapchain_views, swapchain_extent) = Self::create_swapchain(&self.window, &self.gpu, &self.device, &self.khr_swapchain, &self.khr_surface, self.surface, self.surface_format);
+        let (swapchain, swapchain_images, swapchain_views, swapchain_extent) = Self::create_swapchain(&self.gpu, &self.device, &self.khr_swapchain, &self.khr_surface, self.surface, self.surface_format);
         self.swapchain = swapchain;
         self.swapchain_images = swapchain_images;
         self.swapchain_views = swapchain_views;
         self.swapchain_extent = swapchain_extent;
     }
 
-    pub fn new(event_loop: &ActiveEventLoop) -> Self {
+    pub fn new(raw_window: RawWindowHandle, raw_display: RawDisplayHandle) -> Self {
         let entry = unsafe{Entry::load()}.expect("could not find Vulkan");
-        let window = event_loop.create_window(Window::default_attributes()).expect("could not open Vulkan");
 
-        let (instance, surface) = Self::platform_specific_init(&entry, &window, vec![
+        let (instance, surface) = Self::platform_specific_init(&entry, raw_window, raw_display, vec![
             khr::surface::NAME,
             khr::display::NAME,
             khr::get_physical_device_properties2::NAME, // required for shader_object
@@ -279,7 +269,7 @@ impl Renderer {
         println!("gpu: {gpu_memory_idx:?}");
         println!("bar: {bar_memory_idx:?}");
 
-        let (swapchain, swapchain_images, swapchain_views, swapchain_extent) = Self::create_swapchain(&window, &gpu, &device, &khr_swapchain, &khr_surface, surface, surface_format);
+        let (swapchain, swapchain_images, swapchain_views, swapchain_extent) = Self::create_swapchain(&gpu, &device, &khr_swapchain, &khr_surface, surface, surface_format);
         println!("swapchain created");
 
         let command_pool_info = vk::CommandPoolCreateInfo::default()
@@ -311,7 +301,7 @@ impl Renderer {
 
 
 
-        Self{ window, entry, instance, gpu, memory_properties, bar_memory_idx, gpu_memory_idx, surface, device, queue, fam_idx, descriptor_pool, surface_format, swapchain, swapchain_extent, swapchain_images, swapchain_views, command_pool, command_buffer, ready_to_submit, ready_to_present, ready_to_record, khr_display, khr_surface,  khr_swapchain, khr_dynamic_rendering, ext_shader_object }
+        Self{ raw_window, raw_display, entry, instance, gpu, memory_properties, bar_memory_idx, gpu_memory_idx, surface, device, queue, fam_idx, descriptor_pool, surface_format, swapchain, swapchain_extent, swapchain_images, swapchain_views, command_pool, command_buffer, ready_to_submit, ready_to_present, ready_to_record, khr_display, khr_surface,  khr_swapchain, khr_dynamic_rendering, ext_shader_object }
     }
 
     pub fn alloc_buffer(&self, size:u64,usage: vk::BufferUsageFlags, mem_idx:u32) -> (vk::Buffer,vk::DeviceMemory) {
@@ -729,10 +719,9 @@ impl<'a> Frame<'a> {
             pipeline_layout,
             vk::ShaderStageFlags::VERTEX, 0, bytes)};
     }
-}
 
-impl Drop for Frame<'_> {
-    fn drop(&mut self){
+    /// returns false if window redraw is required
+    pub fn end_frame(self) -> bool {
         let renderer = &self.renderer;
         let swap_idx = self.swap_idx;
         // end rendering
@@ -781,16 +770,16 @@ impl Drop for Frame<'_> {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
         match unsafe{renderer.khr_swapchain.queue_present(renderer.queue, &present_info)} {
-            Ok(false) => (),
+            Ok(false) => return true,
             Ok(true) => {
                 println!("resize! (queue present suboptimal)");
                 self.renderer.recreate_swapchain();
-                self.renderer.window.request_redraw();
+                return false;
             },
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 println!("resize! (queue present out of date)");
                 self.renderer.recreate_swapchain();
-                self.renderer.window.request_redraw();
+                return false;
             },
             Err(e) => panic!("queue present error: {e}"),
         }
