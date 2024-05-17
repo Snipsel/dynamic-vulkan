@@ -42,7 +42,13 @@ pub struct Renderer{
     pub ext_shader_object: ext::shader_object::Device,
 }
 
-const SUBRANGE : vk::ImageSubresourceRange = vk::ImageSubresourceRange{ aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level:0, level_count:1, base_array_layer:0, layer_count:1 };
+const SUBRANGE : vk::ImageSubresourceRange = vk::ImageSubresourceRange{
+    aspect_mask: vk::ImageAspectFlags::COLOR,
+    base_mip_level:0,
+    level_count:1,
+    base_array_layer:0,
+    layer_count:1
+};
 
 impl Renderer {
     // TODO: remove dependencie on winit, use raw window/display handles instead

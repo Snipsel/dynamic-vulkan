@@ -29,7 +29,7 @@ pub struct Style<'a>{
     pub color:    Color,
     pub autohint: bool,
     pub subpixel: i32,
-    pub features: &'a[hb::hb_feature_t],
+    pub features: &'a[&'a str],
 }
 
 
@@ -89,7 +89,7 @@ pub struct Text{
 
 pub struct TextEngine{
     _freetype_lib: ft::Library,
-    pub glyph_cache: GlyphCache,
+    glyph_cache: GlyphCache,
     buffer:      *mut hb::hb_buffer_t,
     ft_faces:    Vec<ft::Face>,
     hb_fonts:    Vec<*mut hb::hb_font_t>,
@@ -152,7 +152,6 @@ impl TextEngine {
         }
     }
 
-
     // Text rendering can fundamentally not be cleanly separated into parts. Everything affects
     // everything else. This means the easiest thing to do is have a monolithic function that does
     // everything. It's better to have a monolithic function as API that can hide language
@@ -183,11 +182,19 @@ impl TextEngine {
         let load_flags = if style.autohint { ft::face::LoadFlag::FORCE_AUTOHINT } else { ft::face::LoadFlag::NO_AUTOHINT };
         unsafe{hb_ft_font_set_load_flags(hb_font, load_flags.bits())};
 
+        let features : Vec<_> = style.features.into_iter().map(|f|{
+            let mut ret = unsafe{core::mem::MaybeUninit::<hb_feature_t>::zeroed().assume_init()};
+            if unsafe{hb_feature_from_string(f.as_ptr() as *const i8, f.len() as i32, core::ptr::addr_of_mut!(ret))} != 0 {
+                panic!("failed to parse feature: f");
+            };
+            ret
+        }).collect();
+
         unsafe{
             hb_buffer_reset(self.buffer);
             hb_buffer_add_utf8(self.buffer, text.as_ptr() as *const i8, text.len() as i32, 0, -1);
             hb_buffer_set_segment_properties(self.buffer, &locale.segment_properties);
-            hb_shape(hb_font, self.buffer, if style.features.len()==0 {core::ptr::null()} else {style.features.as_ptr()}, style.features.len() as u32);
+            hb_shape(hb_font, self.buffer, if style.features.len()==0 {core::ptr::null()} else {features.as_ptr()}, features.len() as u32);
         };
 
         let mut glyph_info_count = 0;

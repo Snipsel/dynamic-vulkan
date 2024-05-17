@@ -8,7 +8,8 @@ layout(location = 1) out vec4 out_alpha;
 layout(binding = 0) uniform sampler2D font_texture;
 
 void main(){
-    vec3 alpha = texture(font_texture, in_uv).xyz;
+    // unnormalized coordinates require explicit lod
+    vec3 alpha = textureLod(font_texture, in_uv, 0).xyz;
     out_color = vec4(in_color, 1.0);
     out_alpha = vec4(alpha,    1.0);
 }
