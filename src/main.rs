@@ -31,29 +31,6 @@ fn gen_buffer_image_copy(ptr_offset:u64, buffer_image_copy: BufferImageCopy) -> 
     }
 }
 
-
-fn begin_oneshot_cmd(renderer: &renderer::Renderer) -> vk::CommandBuffer {
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_pool(renderer.command_pool)
-        .command_buffer_count(1);
-    let cmdbuf = unsafe{renderer.device.allocate_command_buffers(&alloc_info)}.unwrap()[0];
-    let begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-    unsafe{renderer.device.begin_command_buffer(cmdbuf, &begin_info)};
-    cmdbuf
-}
-
-fn end_oneshot_cmd(renderer: &renderer::Renderer, cmdbuf : vk::CommandBuffer){
-    unsafe{renderer.device.end_command_buffer(cmdbuf)};
-    let cmdbuf = [cmdbuf];
-    let info = [vk::SubmitInfo::default()
-        .command_buffers(&cmdbuf)];
-    unsafe{renderer.device.queue_submit(renderer.queue, &info, vk::Fence::null())};
-    unsafe{renderer.device.queue_wait_idle(renderer.queue)}; // TODO: remove blocking wait
-    unsafe{renderer.device.free_command_buffers(renderer.command_pool, &cmdbuf)};
-}
-
 unsafe fn push_type<T>(ptr:*mut core::ffi::c_void, object:T) -> *mut core::ffi::c_void {
     let vertex_memory = unsafe{core::mem::transmute::<*mut core::ffi::c_void, *mut T>(ptr)};
     unsafe{core::ptr::write_volatile(vertex_memory, object)};
@@ -119,71 +96,13 @@ impl ApplicationHandler for App {
                 //    .binding_flags(&binding_flag_bits);
 
                 // create texture image
-                let img_info = vk::ImageCreateInfo::default()
-                    .image_type(vk::ImageType::TYPE_2D)
-                    .extent(vk::Extent3D{width:glyph_cache_size as u32, height:glyph_cache_size as u32, depth:1})
-                    .mip_levels(1)
-                    .array_layers(1)
-                    .format(glyph_cache_format)
-                    .tiling(vk::ImageTiling::LINEAR)
-                    .initial_layout(vk::ImageLayout::UNDEFINED)
-                    .usage(vk::ImageUsageFlags::TRANSFER_DST
-                          |vk::ImageUsageFlags::SAMPLED)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .samples(vk::SampleCountFlags::TYPE_1);
-                let image = unsafe{renderer.device.create_image(&img_info, None)}.unwrap();
-                let req = unsafe{renderer.device.get_image_memory_requirements(image)};
-                let alloc = vk::MemoryAllocateInfo::default()
-                    .allocation_size(req.size)
-                    .memory_type_index(renderer.gpu_memory_idx);
-                let mem = unsafe{renderer.device.allocate_memory(&alloc, None)}.unwrap();
-                unsafe{renderer.device.bind_image_memory(image, mem, 0)}.unwrap();
-                println!("allocated {} MB GPU memory for {glyph_cache_size}x{glyph_cache_size} glyph cache image", req.size>>20);
-                let subrange = vk::ImageSubresourceRange{ aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level:0, level_count:1, base_array_layer:0, layer_count:1 };
-                let cmd = begin_oneshot_cmd(&renderer);
+                let (image,view) = renderer.alloc_image_and_view(glyph_cache_size as u32, glyph_cache_size as u32, glyph_cache_format);
                 {
-                    let barrier = [vk::ImageMemoryBarrier::default()
-                        .image(image)
-                        .old_layout(vk::ImageLayout::UNDEFINED)
-                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .src_access_mask(vk::AccessFlags::NONE)
-                        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                        .subresource_range(subrange)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    ];
-                    unsafe{renderer.device.cmd_pipeline_barrier(cmd,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::BY_REGION,
-                        &[], &[], &barrier)};
+                    let cmd = renderer.begin_oneshot_cmd();
+                    renderer.transition_image(cmd, image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                    renderer.end_oneshot_cmd(cmd);
                 }
-                end_oneshot_cmd(&renderer, cmd);
-
-                let view_info = vk::ImageViewCreateInfo::default()
-                    .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(glyph_cache_format)
-                    .subresource_range(subrange);
-                let view = unsafe{renderer.device.create_image_view(&view_info, None)}.unwrap();
-
-                let sampler_info = vk::SamplerCreateInfo::default()
-                    .mag_filter(vk::Filter::NEAREST)
-                    .min_filter(vk::Filter::NEAREST)
-                    .border_color(vk::BorderColor::INT_TRANSPARENT_BLACK)
-                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER)
-                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER)
-                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER)
-                    .anisotropy_enable(false)
-                    .unnormalized_coordinates(true)
-                    .compare_enable(false)
-                    .compare_op(vk::CompareOp::ALWAYS)
-                    .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
-                    .mip_lod_bias(0.0)
-                    .min_lod(0.0)
-                    .max_lod(0.0);
-                let sampler = unsafe{renderer.device.create_sampler(&sampler_info, None)}.unwrap();
+                let sampler = renderer.new_sampler_nearest();
 
                 // create descriptor set layout
                 let set_layout_bindings = [
@@ -258,8 +177,6 @@ impl ApplicationHandler for App {
                 let win_w = winsize.width as f32;
                 let win_h = winsize.height as f32;
 
-                let mut frame = renderer.wait_for_frame();
-
                 let english = Locale::new("en", Script::LATIN, Direction::LeftToRight);
                 let mut text = Text::default();
 
@@ -298,6 +215,8 @@ impl ApplicationHandler for App {
                 text_engine.render_line_of_text(&mut text, &english, &style_h2, cursor, "And it has absolutely kick-ass italics.");
                 cursor.1 += 20*64;
                 //text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_engine.glyph_cache.current_x as i16, 50, 0, 0, gb_yellow)); // debug: visualize glyph_cache
+
+                let mut frame = renderer.wait_and_begin_frame();
 
                 // copy text into bar memory
                 let mut bar_ptr = *bar_memory;

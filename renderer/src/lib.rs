@@ -42,6 +42,8 @@ pub struct Renderer{
     pub ext_shader_object: ext::shader_object::Device,
 }
 
+const SUBRANGE : vk::ImageSubresourceRange = vk::ImageSubresourceRange{ aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level:0, level_count:1, base_array_layer:0, layer_count:1 };
+
 impl Renderer {
     // TODO: remove dependencie on winit, use raw window/display handles instead
     fn platform_specific_init(entry: &ash::Entry, raw_window:RawWindowHandle, raw_display:RawDisplayHandle, mut extensions: Vec<&ffi::CStr>) -> (ash::Instance, SurfaceKHR) {
@@ -294,6 +296,98 @@ impl Renderer {
         Self{ raw_window, raw_display, entry, instance, gpu, memory_properties, bar_memory_idx, gpu_memory_idx, surface, device, queue, fam_idx, descriptor_pool, surface_format, swapchain, swapchain_extent, swapchain_images, swapchain_views, command_pool, command_buffer, ready_to_submit, ready_to_present, ready_to_record, khr_display, khr_surface,  khr_swapchain, khr_dynamic_rendering, ext_shader_object }
     }
 
+
+    pub fn begin_oneshot_cmd(&self) -> vk::CommandBuffer {
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_pool(self.command_pool)
+            .command_buffer_count(1);
+        let cmdbuf = unsafe{self.device.allocate_command_buffers(&alloc_info)}.unwrap()[0];
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe{self.device.begin_command_buffer(cmdbuf, &begin_info)}.unwrap();
+        cmdbuf
+    }
+
+    pub fn end_oneshot_cmd(&self, cmdbuf : vk::CommandBuffer){
+        unsafe{self.device.end_command_buffer(cmdbuf)}.unwrap();
+        let cmdbuf = [cmdbuf];
+        let info = [vk::SubmitInfo::default()
+            .command_buffers(&cmdbuf)];
+        unsafe{self.device.queue_submit(self.queue, &info, vk::Fence::null())}.unwrap();
+        unsafe{self.device.queue_wait_idle(self.queue)}.unwrap(); // TODO: remove blocking wait
+        unsafe{self.device.free_command_buffers(self.command_pool, &cmdbuf)};
+    }
+
+
+    pub fn new_sampler_nearest(&self) -> vk::Sampler {
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
+            .border_color(vk::BorderColor::INT_TRANSPARENT_BLACK)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER)
+            .anisotropy_enable(false)
+            .unnormalized_coordinates(true)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::ALWAYS)
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+            .mip_lod_bias(0.0)
+            .min_lod(0.0)
+            .max_lod(0.0);
+        unsafe{self.device.create_sampler(&sampler_info, None)}.unwrap()
+    }
+
+    pub fn transition_image(&self, cmd: vk::CommandBuffer, image: vk::Image, from:vk::ImageLayout, to:vk::ImageLayout){
+        let barrier = [vk::ImageMemoryBarrier::default()
+            .image(image)
+            .old_layout(from)
+            .new_layout(to)
+            .src_access_mask(vk::AccessFlags::NONE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .subresource_range(SUBRANGE)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        ];
+        unsafe{self.device.cmd_pipeline_barrier(cmd,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::BY_REGION,
+            &[], &[], &barrier)};
+    }
+
+    pub fn alloc_image_and_view(&self, width:u32, height:u32, format:vk::Format) -> (vk::Image,vk::ImageView) {
+        let img_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .extent(vk::Extent3D{width, height, depth:1})
+            .mip_levels(1)
+            .array_layers(1)
+            .format(format)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST
+                  |vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .samples(vk::SampleCountFlags::TYPE_1);
+        let image = unsafe{self.device.create_image(&img_info, None)}.unwrap();
+        let req = unsafe{self.device.get_image_memory_requirements(image)};
+        let alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(req.size)
+            .memory_type_index(self.gpu_memory_idx);
+        let mem = unsafe{self.device.allocate_memory(&alloc, None)}.unwrap();
+        unsafe{self.device.bind_image_memory(image, mem, 0)}.unwrap();
+
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(SUBRANGE);
+        let view = unsafe{self.device.create_image_view(&view_info, None)}.unwrap();
+
+        (image,view)
+    }
+
     pub fn alloc_buffer(&self, size:u64,usage: vk::BufferUsageFlags, mem_idx:u32) -> (vk::Buffer,vk::DeviceMemory) {
         let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
@@ -392,7 +486,7 @@ impl Renderer {
         }
     }
 
-    pub fn wait_for_frame(&mut self) -> Frame { Frame::new(self) }
+    pub fn wait_and_begin_frame(&mut self) -> Frame { Frame::new(self) }
 
     pub fn debug_print(&self){
         let properties = unsafe{self.instance.get_physical_device_properties(self.gpu)};
@@ -426,7 +520,7 @@ pub struct Frame<'a>{
 }
 impl<'a> Frame<'a> {
 
-    pub fn new(renderer: &'a mut Renderer) -> Self {
+    fn new(renderer: &'a mut Renderer) -> Self {
         // Synchronisation
         // three primitives:
         //  - ready_to_record:  signaled by VkQueueSubmit, awaited by host before vkAcquireNextImageKHR
@@ -484,15 +578,13 @@ impl<'a> Frame<'a> {
 
     pub fn buffer_to_image(&self, buffer: vk::Buffer, image: vk::Image, regions: &[vk::BufferImageCopy]){
         if regions.len() == 0 { return; }
-        let subrange = vk::ImageSubresourceRange{ aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level:0, level_count:1, base_array_layer:0, layer_count:1 };
         let to_write_optimal = [vk::ImageMemoryBarrier::default()
             .image(image)
             .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .src_access_mask(vk::AccessFlags::NONE)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .subresource_range(subrange)
+            .subresource_range(SUBRANGE)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         ];
@@ -515,7 +607,7 @@ impl<'a> Frame<'a> {
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .src_access_mask(vk::AccessFlags::NONE)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .subresource_range(subrange)
+            .subresource_range(SUBRANGE)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         ];
@@ -722,12 +814,7 @@ impl<'a> Frame<'a> {
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
                 .image(renderer.swapchain_images[swap_idx as usize])
-                .subresource_range(vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1))
+                .subresource_range(SUBRANGE)
         ];
         unsafe{renderer.device.cmd_pipeline_barrier(renderer.command_buffer,
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
