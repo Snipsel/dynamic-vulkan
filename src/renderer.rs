@@ -375,14 +375,6 @@ impl Renderer {
             push_constant_ranges : &[vk::PushConstantRange],
             descriptor_set_layout : &[vk::DescriptorSetLayout]) -> (ShaderEXT,ShaderEXT) {
 
-        //let vs = match std::fs::read(vs_spv_path) {
-        //    Ok(vs) => vs,
-        //    Err(e) => { panic!("\n{ERR_STR} could not read vertex shader\n{}\n{e}\n", pretty_print_path(vs_spv_path)) }
-        //};
-        //let fs = match std::fs::read(fs_spv_path) {
-        //    Ok(fs) => fs,
-        //    Err(e) => { panic!("\n{ERR_STR} could not read fragment shader\n{}\n{e}\n", pretty_print_path(fs_spv_path)) }
-        //};
         let shader_infos = [
             vk::ShaderCreateInfoEXT::default()
                 .flags(vk::ShaderCreateFlagsEXT::LINK_STAGE)

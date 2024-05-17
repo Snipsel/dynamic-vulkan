@@ -187,7 +187,7 @@ fn gen_buffer_image_copy( buffer_offset: u64,
     vk::BufferImageCopy{
         buffer_offset,
         buffer_row_length: pitch,
-        buffer_image_height: height, // 0 should also be fine
+        buffer_image_height: 0,
         image_offset: vk::Offset3D{x:u, y:v, z:0},
         image_extent: vk::Extent3D{width, height, depth: 1},
         image_subresource: vk::ImageSubresourceLayers{
@@ -298,16 +298,32 @@ fn render_line_of_text(
         }else{
             ft_face.load_glyph(id, load_flags);
             let subpixel_offset = Some(ft::Vector{x:frac64 as i64, y:0});
-            let glyph  = ft_face.glyph().get_glyph().unwrap().to_bitmap(ft::render_mode::RenderMode::Normal, subpixel_offset).unwrap();
+            let glyph  = ft_face.glyph().get_glyph().unwrap().to_bitmap(ft::render_mode::RenderMode::Lcd, subpixel_offset).unwrap();
             let bitmap = glyph.bitmap();
-            let width  = bitmap.width();
+            let width_sub  = bitmap.width();
+            let width = width_sub/3;
             let height = bitmap.rows();
             let pitch  = bitmap.pitch();
             let left   = glyph.left();
             let top    = glyph.top();
             if !(width<=0 || height<=0) { 
+                assert_eq!(ret.pixels.len()%4, 0);
+                let buffer_offset = ret.pixels.len() as u64;
                 let uv = renderer.glyph_cache.insert( GlyphCacheKey{ font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}, 
                                                       width as u16, height as u16, left as i16, top as i16);
+                // convert to tightly-packed rgba
+                let bitmap_buffer = bitmap.buffer();
+                let mut pixel_counter = 0;
+                for h in 0..height {
+                    for w in 0..width_sub {
+                        ret.pixels.push(bitmap_buffer[(h*pitch + w) as usize]);
+                        if pixel_counter%3==2 { 
+                            ret.pixels.push(0xFF);
+                        }
+                        pixel_counter += 1;
+                    }
+                }
+                
                 ret.quads.push(
                     gen_quad((x+left) as i16,
                              (y-top)  as i16,
@@ -316,13 +332,10 @@ fn render_line_of_text(
                              style.color));
                 ret.buffer_updates.push(
                     gen_buffer_image_copy(
-                        ret.pixels.len() as u64,
-                        pitch as u32, width as u32, height as u32,
+                        buffer_offset,
+                        0 as u32, width as u32, height as u32,
                         uv.0 as i32,
                         uv.1 as i32));
-                for b in bitmap.buffer() {
-                    ret.pixels.push(*b);
-                }
             }
         }
 
@@ -407,13 +420,16 @@ impl ApplicationHandler for App {
                 //let mut binding_flags = vk::DescriptorSetLayoutBindingFlagsCreateInfoEXT::default()
                 //    .binding_flags(&binding_flag_bits);
 
+                let glyph_cache_format = vk::Format::R8G8B8A8_UNORM;
+                let glyph_cache_size   = 1<<14;
+
                 // create texture image
                 let img_info = vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
-                    .extent(vk::Extent3D{width:1<<14, height:1<<14, depth:1})
+                    .extent(vk::Extent3D{width:glyph_cache_size, height:glyph_cache_size, depth:1})
                     .mip_levels(1)
                     .array_layers(1)
-                    .format(vk::Format::R8_UNORM)
+                    .format(glyph_cache_format)
                     .tiling(vk::ImageTiling::LINEAR)
                     .initial_layout(vk::ImageLayout::UNDEFINED)
                     .usage(vk::ImageUsageFlags::TRANSFER_DST
@@ -427,8 +443,7 @@ impl ApplicationHandler for App {
                     .memory_type_index(renderer.gpu_memory_idx);
                 let mem = unsafe{renderer.device.allocate_memory(&alloc, None)}.unwrap();
                 unsafe{renderer.device.bind_image_memory(image, mem, 0)}.unwrap();
-                //let img_ptr = unsafe{renderer.device.map_memory(mem, 0, req.size, vk::MemoryMapFlags::empty())}.unwrap();
-                println!("allocated {} MB GPU memory for image", req.size>>20);
+                println!("allocated {} MB GPU memory for {glyph_cache_size}x{glyph_cache_size} glyph cache image", req.size>>20);
                 let subrange = vk::ImageSubresourceRange{ aspect_mask: vk::ImageAspectFlags::COLOR,
                         base_mip_level:0, level_count:1, base_array_layer:0, layer_count:1 };
                 let cmd = begin_oneshot_cmd(&renderer);
@@ -454,7 +469,7 @@ impl ApplicationHandler for App {
                 let view_info = vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(vk::Format::R8_UNORM)
+                    .format(glyph_cache_format)
                     .subresource_range(subrange);
                 let view = unsafe{renderer.device.create_image_view(&view_info, None)}.unwrap();
 
@@ -516,7 +531,8 @@ impl ApplicationHandler for App {
                 let pipeline_layout = unsafe{ renderer.device.create_pipeline_layout(&pipeline_layout_info, None) }.unwrap();
                 println!("pipeline layout: {pipeline_layout:?}");
 
-                let (vs,fs) = renderer.load_glsl_vs_fs("shaders/text-renderer.vert.glsl", "shaders/text-renderer.frag.glsl", &push_constant_ranges, &set_layouts);
+                //let (vs,fs) = renderer.load_glsl_vs_fs("shaders/text-renderer.vert.glsl", "shaders/text-renderer.frag.glsl", &push_constant_ranges, &set_layouts);
+                let (vs,fs) = renderer.load_glsl_vs_fs("shaders/text-renderer.vert.glsl", "shaders/subpixel.frag.glsl", &push_constant_ranges, &set_layouts);
                 let Some((bar_buffer, bar_memory)) = renderer.map_bar_buffer(64<<20,
                     vk::BufferUsageFlags::VERTEX_BUFFER
                   | vk::BufferUsageFlags::INDEX_BUFFER
@@ -596,7 +612,12 @@ impl ApplicationHandler for App {
                     bar_ptr = push_quad_indices(bar_ptr, (i*4) as u16);
                 }
 
-                let pixel_buffer_offset   = unsafe{bar_ptr.byte_offset_from(*bar_memory)} as u64;
+                // align pixel buffer
+                bar_ptr = unsafe{bar_ptr.byte_offset(bar_ptr.byte_offset_from(*bar_memory)%4)};
+
+                let pixel_buffer_offset = unsafe{bar_ptr.byte_offset_from(*bar_memory)} as u64;
+                println!("pixel_buffer_offset: {pixel_buffer_offset}");
+                assert_eq!(pixel_buffer_offset%4,0);
                 for b in text.pixels.iter() {
                     // inefficient?
                     unsafe{core::mem::transmute::<*mut core::ffi::c_void, *mut u8>(bar_ptr).write_volatile(*b);}
