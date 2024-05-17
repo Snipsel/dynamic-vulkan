@@ -1,37 +1,27 @@
-use core::mem::size_of;
-use std::{
-    collections::HashSet, 
-    fmt,
-    ffi::{CStr,OsStr}
+use core::{
+    mem::size_of,
+    ffi,
 };
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle, RawDisplayHandle};
+use std::collections::HashSet;
+use raw_window_handle::{RawWindowHandle, RawDisplayHandle};
 use ash::{
-     ext, khr, vk::{self, CommandBuffer, CommandPool, Fence, Handle, Image, ImageView, InstanceCreateInfo, PhysicalDevice, Queue, Semaphore, ShaderEXT, SurfaceCapabilitiesKHR, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, Extent2D, PhysicalDeviceMemoryProperties}, Device, Entry, Instance
+     ext, khr, vk::{self, CommandBuffer, CommandPool, Fence, Handle, Image, ImageView, InstanceCreateInfo, PhysicalDevice, Queue, Semaphore, ShaderEXT, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, Extent2D, PhysicalDeviceMemoryProperties},
 };
 use bitflags::bitflags;
 
 const ERR_STR : &'static str = "\x1B[41;97;1m ERROR \x1B[m";
-fn pretty_print_path<P:?Sized+AsRef<std::path::Path>>(path:&P) -> String {
-    let p = path.as_ref().to_string_lossy();
-    let pwd = match std::env::current_dir() {
-        Ok(pathbuf) => pathbuf.to_string_lossy().into(),
-        Err(e) => "./".to_owned(),
-    };
-    format!("\x1B[m\x1B[37m{pwd}/\x1B[91;1m{p}\x1B[m")
-}
-
 
 pub struct Renderer{
     pub raw_window:  RawWindowHandle,
     pub raw_display: RawDisplayHandle,
-    pub entry:    Entry,
-    pub instance: Instance,
+    pub entry:    ash::Entry,
+    pub instance: ash::Instance,
     pub gpu:      PhysicalDevice,
     pub memory_properties: PhysicalDeviceMemoryProperties,
     pub bar_memory_idx: Option<u32>,
     pub gpu_memory_idx: u32,
     pub surface:  SurfaceKHR,
-    pub device:   Device,
+    pub device:   ash::Device,
     pub queue:    Queue,
     pub fam_idx:  u32,
     pub descriptor_pool: vk::DescriptorPool,
@@ -54,7 +44,7 @@ pub struct Renderer{
 
 impl Renderer {
     // TODO: remove dependencie on winit, use raw window/display handles instead
-    fn platform_specific_init(entry: &Entry, raw_window:RawWindowHandle, raw_display:RawDisplayHandle, mut extensions: Vec<&CStr>) -> (Instance, SurfaceKHR) {
+    fn platform_specific_init(entry: &ash::Entry, raw_window:RawWindowHandle, raw_display:RawDisplayHandle, mut extensions: Vec<&ffi::CStr>) -> (ash::Instance, SurfaceKHR) {
         let layers = [c"VK_LAYER_KHRONOS_validation".as_ptr()];
         match (raw_window, raw_display) {
             (RawWindowHandle::Xlib(win), RawDisplayHandle::Xlib(dpy)) => {
@@ -76,7 +66,7 @@ impl Renderer {
         }
     }
 
-    fn create_swapchain(gpu:&PhysicalDevice, device:&Device, khr_swapchain: &khr::swapchain::Device, khr_surface: &khr::surface::Instance, surface: SurfaceKHR, surface_format:SurfaceFormatKHR)
+    fn create_swapchain(gpu:&PhysicalDevice, device:&ash::Device, khr_swapchain: &khr::swapchain::Device, khr_surface: &khr::surface::Instance, surface: SurfaceKHR, surface_format:SurfaceFormatKHR)
             -> (SwapchainKHR, Vec<Image>, Vec<ImageView>, Extent2D) {
         let default_size = Extent2D{width: 1280, height:720}; // TODO: derive from Display
         let capabilities = unsafe{khr_surface.get_physical_device_surface_capabilities(*gpu, surface)}.unwrap();
@@ -137,7 +127,7 @@ impl Renderer {
     }
 
     pub fn new(raw_window: RawWindowHandle, raw_display: RawDisplayHandle) -> Self {
-        let entry = unsafe{Entry::load()}.expect("could not find Vulkan");
+        let entry = unsafe{ash::Entry::load()}.expect("could not find Vulkan");
 
         let (instance, surface) = Self::platform_specific_init(&entry, raw_window, raw_display, vec![
             khr::surface::NAME,
@@ -253,9 +243,9 @@ impl Renderer {
             let device_local = heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL);
             let mut select = "";
             if host_visible && device_local {
-                let rebar = if heap.size<(256<<20) { select="BAR ->" } else { select="reBAR ->" };
                 if bar_memory_idx.is_none() { 
                     bar_memory_idx = Some(i as u32);
+                    select = if heap.size<(256<<20) { "BAR ->" } else { "reBAR ->" };
                 };
             } else if device_local {
                 if gpu_memory_idx.is_none() {
@@ -315,11 +305,11 @@ impl Renderer {
             .allocation_size(req.size)
             .memory_type_index(mem_idx);
         let memory = unsafe{ self.device.allocate_memory(&alloc_info, None) }.expect("could not alloc memory");
-        unsafe{ self.device.bind_buffer_memory(buffer, memory, 0); }
+        unsafe{ self.device.bind_buffer_memory(buffer, memory, 0) }.unwrap();
         (buffer, memory)
     }
 
-    pub fn map_bar_buffer(&self, size:u64, usage: vk::BufferUsageFlags) -> Option<(vk::Buffer,*mut core::ffi::c_void)> {
+    pub fn map_bar_buffer(&self, size:u64, usage: vk::BufferUsageFlags) -> Option<(vk::Buffer,*mut ffi::c_void)> {
         let mem_idx = match self.bar_memory_idx {
             None => return None,
             Some(idx) => idx,
@@ -332,15 +322,15 @@ impl Renderer {
         Some((buffer,ptr))
     }
 
-    // TODO: #[cfg(feature="glslc")]
+    #[cfg(feature="glsl")]
     pub fn load_glsl_vs_fs<P:?Sized+AsRef<std::path::Path>> (&self,
             vs_glsl_path: &P, 
             fs_glsl_path: &P, 
             push_constant_ranges : &[vk::PushConstantRange],
             descriptor_set_layout : &[vk::DescriptorSetLayout]) -> (ShaderEXT,ShaderEXT) {
         use shaderc;
-        let mut compiler = shaderc::Compiler::new().unwrap();
-        let mut options  = shaderc::CompileOptions::new().unwrap();
+        let compiler = shaderc::Compiler::new().unwrap();
+        let options  = shaderc::CompileOptions::new().unwrap();
 
         let vert_src = std::fs::read_to_string(vs_glsl_path).expect("could not read vertex shader");
         let vert = compiler.compile_into_spirv(
@@ -391,8 +381,6 @@ impl Renderer {
         match unsafe{ self.ext_shader_object.create_shaders(&shader_infos, None) } {
             Ok(ret) => (ret[0], ret[1]),
             Err((ret,err)) => {
-                let vs = ret[0];
-                let fs = ret[1];
                 if ret[0].is_null() {
                     panic!("\n{ERR_STR} vertex shader failed to compile\n{err}\n")
                 }else if ret[1].is_null() {
@@ -444,13 +432,13 @@ impl<'a> Frame<'a> {
         //  - ready_to_record:  signaled by VkQueueSubmit, awaited by host before vkAcquireNextImageKHR
         //  - ready_to_submit:  signaled by vkAcquireNextImageKHR, awaited by vkQueueSubmit
         //  - ready_to_present: signaled by vkQueueSubmit, awaited by vkQueuePresentKHR
-        unsafe{renderer.device.wait_for_fences(&[renderer.ready_to_record], true, u64::MAX)};
-        unsafe{renderer.device.reset_fences(&[renderer.ready_to_record])};
+        unsafe{renderer.device.wait_for_fences(&[renderer.ready_to_record], true, u64::MAX)}.unwrap();
+        unsafe{renderer.device.reset_fences(&[renderer.ready_to_record])}.unwrap();
 
         let swap_idx = loop{
-            let swap_idx = match unsafe{renderer.khr_swapchain.acquire_next_image(renderer.swapchain, u64::MAX, renderer.ready_to_submit, Fence::null())} {
+            match unsafe{renderer.khr_swapchain.acquire_next_image(renderer.swapchain, u64::MAX, renderer.ready_to_submit, Fence::null())} {
                 Ok((swap_idx, false)) => break swap_idx,
-                Ok((swap_idx, true)) => {
+                Ok((    _   , true)) => {
                     println!("resize! (aquire_next_image suboptimal)");
                     renderer.recreate_swapchain();
                 },
@@ -465,7 +453,7 @@ impl<'a> Frame<'a> {
         };
 
         // begin command buffer
-        unsafe{renderer.device.reset_command_buffer(renderer.command_buffer, vk::CommandBufferResetFlags::empty())};
+        unsafe{renderer.device.reset_command_buffer(renderer.command_buffer, vk::CommandBufferResetFlags::empty())}.unwrap();
         let begin_info = vk::CommandBufferBeginInfo::default();
         unsafe{renderer.device.begin_command_buffer(renderer.command_buffer, &begin_info)}.unwrap();
 

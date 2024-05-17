@@ -1,6 +1,5 @@
 use freetype as ft;
 use harfbuzz_sys as hb;
-use hb::{freetype::hb_ft_font_create_referenced, hb_face_create, hb_font_get_face, hb_font_set_variations, hb_language_t};
 use std::collections::HashMap;
 use common::{Color,Vertex,vec2,div_round,gen_quad};
 
@@ -8,9 +7,9 @@ use common::{Color,Vertex,vec2,div_round,gen_quad};
 #[link(name="harfbuzz")]
 extern{
     //fn hb_ft_font_get_face(hb_font: *mut hb::hb_font_t) -> ft::ffi::FT_Face;
-    fn hb_ft_font_set_funcs(hb_font: *mut hb::hb_font_t);
+    //fn hb_ft_font_set_funcs(hb_font: *mut hb::hb_font_t);
     fn hb_ft_font_set_load_flags(hb_font: *mut hb::hb_font_t, load_flags: i32);
-    fn hb_ft_face_create(ft_face : ft::ffi::FT_Face, destroy : hb::hb_destroy_func_t) -> *mut hb::hb_face_t;
+    //fn hb_ft_face_create(ft_face : ft::ffi::FT_Face, destroy : hb::hb_destroy_func_t) -> *mut hb::hb_face_t;
     fn hb_ft_font_changed(font : *mut hb::hb_font_t);
 }
 
@@ -89,7 +88,7 @@ pub struct Text{
 }
 
 pub struct TextEngine{
-    freetype_lib: ft::Library,
+    _freetype_lib: ft::Library,
     pub glyph_cache: GlyphCache,
     buffer:      *mut hb::hb_buffer_t,
     ft_faces:    Vec<ft::Face>,
@@ -105,10 +104,10 @@ pub enum Direction{
     BottomToTop = hb::HB_DIRECTION_BTT,
 }
 impl Direction{
-    const fn is_horizontal(self) -> bool {
+    pub const fn is_horizontal(self) -> bool {
         (self as u32) == (Self::LeftToRight as u32) || (self as u32) == (Self::RightToLeft as u32)
     }
-    const fn is_vertical(self) -> bool {
+    pub const fn is_vertical(self) -> bool {
         (self as u32) == (Self::TopToBottom as u32) || (self as u32) == (Self::BottomToTop as u32)
     }
 }
@@ -119,7 +118,7 @@ pub struct Locale{
 }
 impl Locale{
     // todo: expose language as enum/enum-like struct
-    const fn with_language_tag(lang: hb_language_t, script: Script, direction: Direction) -> Self {
+    const fn with_language_tag(lang: hb::hb_language_t, script: Script, direction: Direction) -> Self {
         // reserved members in hb_segment_properties_t, make sure to zero out struct to remain forward compatible
         let mut segment_properties = unsafe{core::mem::MaybeUninit::<hb::hb_segment_properties_t>::zeroed().assume_init()};
         segment_properties.language = lang;
@@ -128,7 +127,7 @@ impl Locale{
         Locale{segment_properties}
     }
     pub fn new(lang: &str, script: Script, direction: Direction) -> Self {
-        let tag = unsafe{hb::hb_language_from_string(lang.as_ptr() as *const i8, lang.len() as i32)} as hb_language_t;
+        let tag = unsafe{hb::hb_language_from_string(lang.as_ptr() as *const i8, lang.len() as i32)} as hb::hb_language_t;
         Self::with_language_tag(tag, script, direction)
     }
 }
@@ -136,19 +135,17 @@ impl Locale{
 impl TextEngine {
     pub fn new(glyph_texture_size:u16, fontfiles: &[&str]) -> Self {
         let freetype_lib = ft::Library::init().expect("failed to initialize freetype");
-        let mut hb_fonts = vec![];
-        let mut ft_faces = vec![
-            freetype_lib.new_face("./fonts/source-sans/upright.ttf", 0).expect("could not find font"),
-            freetype_lib.new_face("./fonts/source-sans/italic.ttf",  0).expect("could not find font"),
-            freetype_lib.new_face("./fonts/crimson-pro/upright.ttf", 0).expect("could not find font"),
-            freetype_lib.new_face("./fonts/crimson-pro/italic.ttf",  0).expect("could not find font"),
-        ];
+        let mut hb_fonts = Vec::new();
+        let mut ft_faces = Vec::new();
+        for file in fontfiles {
+            ft_faces.push(freetype_lib.new_face(file, 0).expect("could not find font"));
+        }
         for ft_face in &mut ft_faces {
             let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face.raw_mut())};
             hb_fonts.push(hb_font);
         }
         TextEngine{
-            freetype_lib,
+            _freetype_lib: freetype_lib,
             buffer: unsafe{hb::hb_buffer_create()},
             ft_faces, hb_fonts,
             glyph_cache: GlyphCache::new(glyph_texture_size),
@@ -172,13 +169,13 @@ impl TextEngine {
         assert!(style.subpixel>=1);
         assert!(style.subpixel<=64);
 
-        let hb_font =  self.hb_fonts[style.font_idx as usize];
-        let mut ft_face = &mut self.ft_faces[style.font_idx as usize];
-        ft_face.set_char_size(0, (style.size as isize)*64, 0, 0);
+        let hb_font = self.hb_fonts[style.font_idx as usize];
+        let ft_face = &mut self.ft_faces[style.font_idx as usize];
+        ft_face.set_char_size(0, (style.size as isize)*64, 0, 0).unwrap();
 
 
         // TODO: assert that exactly 1 variable axis exists, and that it corresponds to font-weight
-        let mut amaster : *mut ft::ffi::FT_MM_Var = core::ptr::null_mut();
+        //let mut amaster : *mut ft::ffi::FT_MM_Var = core::ptr::null_mut();
         let var = (style.weight as i64) <<16;
         unsafe{ft::ffi::FT_Set_Var_Design_Coordinates(ft_face.raw_mut(), 1, &var)};
 
@@ -207,7 +204,7 @@ impl TextEngine {
         for (info,pos) in std::iter::zip(glyph_infos, glyph_positons) {
             let id = info.codepoint; // actually glyph index, not codepoint
             let x = div_round((cursor.0 + pos.x_offset)*style.subpixel, 64);
-            let y = div_round((cursor.1 + pos.y_offset), 64);
+            let y = div_round( cursor.1 + pos.y_offset , 64);
             let x_frac = x%style.subpixel;
             let x = x/style.subpixel;
 
@@ -225,7 +222,7 @@ impl TextEngine {
                                  style.color));
                 }
             }else{
-                ft_face.load_glyph(id, load_flags);
+                ft_face.load_glyph(id, load_flags).unwrap();
                 let subpixel_offset = Some(ft::Vector{x:frac64 as i64, y:0});
                 let glyph  = ft_face.glyph().get_glyph().unwrap().to_bitmap(ft::render_mode::RenderMode::Lcd, subpixel_offset).unwrap();
                 let bitmap = glyph.bitmap();

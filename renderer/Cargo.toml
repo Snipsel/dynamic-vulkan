@@ -3,9 +3,12 @@ name = "renderer"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+glsl = ["dep:shaderc"]
+
 [dependencies]
 common = { path = "../common" }
 ash = "0.38"
 raw-window-handle = "0.6"
 bitflags    = "2"
-shaderc = {version="0.8", optional = false} # in future: make optional dependency
+shaderc = {version="0.8", optional = true}

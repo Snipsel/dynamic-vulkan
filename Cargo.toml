@@ -19,7 +19,7 @@ strip="symbols"
 
 [dependencies]
 common      = { path = "common" }
-renderer    = { path = "renderer" }
+renderer    = { path = "renderer", features=["glsl"] }
 text-engine = { path = "text-engine" }
 raw-window-handle = "0.6"
 winit       = "0.30"
