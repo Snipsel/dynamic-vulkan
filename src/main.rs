@@ -1,5 +1,9 @@
 #![allow(unused)]
+mod common;
+use common::{Color,Vertex,vec2,div_round};
 mod renderer;
+mod text_engine;
+use text_engine::*;
 
 use std::{
     collections::HashMap, ffi::{CStr,OsStr}, fmt, mem::size_of, ptr
@@ -18,35 +22,6 @@ use ash::{
      ext, khr, vk::{self, CommandBuffer, CommandPool, Fence, Handle, Image, ImageView, InstanceCreateInfo, PhysicalDevice, Queue, Semaphore, ShaderEXT, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, WriteDescriptorSet}, Device, Entry, Instance
 };
 use bitflags::bitflags;
-
-mod math{
-    #![allow(non_camel_case_types)]
-    use core::ops::*;
-
-    // pub const fn q6(x:i32) -> i32q6 { i32q6(x<<6) }
-
-    // #[repr(transparent)]
-    // #[derive(Clone,Copy)]
-    // pub struct i32q6(pub(super)i32);
-    // impl From<i32> for i32q6 { fn from(value: i32) -> Self { Self(value<<6) } }
-    // impl Add for i32q6 { type Output=Self; fn add(self, rhs: Self) -> Self { Self(self.0+rhs.0) } }
-    // impl Sub for i32q6 { type Output=Self; fn sub(self, rhs: Self) -> Self { Self(self.0-rhs.0) } }
-    // impl Mul for i32q6 { type Output=Self; fn mul(self, rhs: Self) -> Self { Self((self.0*rhs.0)>>6) } }
-    // impl AddAssign      for i32q6 { fn add_assign(&mut self, rhs: Self) { self.0 += rhs.0;  } }
-    // impl SubAssign      for i32q6 { fn sub_assign(&mut self, rhs: Self) { self.0 -= rhs.0;  } }
-    // impl AddAssign<i32> for i32q6 { fn add_assign(&mut self, rhs: i32)  { self.0 += rhs<<6; } }
-    // impl SubAssign<i32> for i32q6 { fn sub_assign(&mut self, rhs: i32)  { self.0 -= rhs<<6; } }
-
-    #[derive(Clone,Copy)]
-    pub struct vec2<T>(pub T,pub T) where T:Clone+Copy;
-    impl<T> Add for vec2<T> where T:Clone+Copy+Add<Output=T> { type Output=Self; fn add(self, rhs: Self) -> Self { Self(self.0+rhs.0, self.1+rhs.1) } }
-    impl<T> Sub for vec2<T> where T:Clone+Copy+Sub<Output=T> { type Output=Self; fn sub(self, rhs: Self) -> Self { Self(self.0-rhs.0, self.1-rhs.1) } }
-    impl<T> Mul<T> for vec2<T> where T:Clone+Copy+Mul<Output=T> { type Output=Self; fn mul(self, rhs: T) -> Self { Self(self.0*rhs, self.1*rhs) } }
-    impl<T> Div<T> for vec2<T> where T:Clone+Copy+Div<Output=T> { type Output=Self; fn div(self, rhs: T) -> Self { Self(self.0/rhs, self.1/rhs) } }
-    impl<T,U> AddAssign<vec2<U>> for vec2<T> where T:Clone+Copy+AddAssign<U>, U:Clone+Copy { fn add_assign(&mut self, rhs: vec2<U>) { self.0 += rhs.0; self.1 += rhs.1; } }
-    impl<T,U> SubAssign<vec2<U>> for vec2<T> where T:Clone+Copy+SubAssign<U>, U:Clone+Copy { fn sub_assign(&mut self, rhs: vec2<U>) { self.0 -= rhs.0; self.1 -= rhs.1; } }
-}
-use math::{vec2};
 
 fn begin_oneshot_cmd(renderer: &renderer::Renderer) -> vk::CommandBuffer {
     let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -70,40 +45,6 @@ fn end_oneshot_cmd(renderer: &renderer::Renderer, cmdbuf : vk::CommandBuffer){
     unsafe{renderer.device.free_command_buffers(renderer.command_pool, &cmdbuf)};
 }
 
-// TODO: think about colors. Right now Color means sRGBA8
-// maybe have f32 oklab colors internally and use .srgba8() to convert?
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-struct Color{
-    r:u8, g:u8, b:u8, a:u8
-}
-impl Color{
-    const CLEAR:Color = Color{r:0x00, g:0x00, b:0x00, a:0x00};
-    const WHITE:Color = Color{r:0xFF, g:0xFF, b:0xFF, a:0xFF};
-    const BLACK:Color = Color{r:0x00, g:0x00, b:0x00, a:0xFF};
-}
-
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-struct Vertex{
-    x:i16, y:i16,
-    u:u16, v:u16,
-    color: Color
-}
-
-fn gen_quad(x: i16, y: i16, w: i16, h: i16, u:u16, v:u16, color: Color) -> [Vertex;4] {
-    assert!(w > 0);
-    assert!(h > 0);
-    let w_ = w as u16;
-    let h_ = h as u16;
-    [
-        Vertex{x:x+0,  y:y+0, u:u+0,  v:v+0,  color}, // top left
-        Vertex{x:x+0,  y:y+h, u:u+0,  v:v+h_, color}, // bottom left
-        Vertex{x:x+w,  y:y+0, u:u+w_, v:v+0,  color}, // top right
-        Vertex{x:x+w,  y:y+h, u:u+w_, v:v+h_, color}, // bottom right
-    ]
-}
-
 unsafe fn push_type<T>(ptr:*mut core::ffi::c_void, object:T) -> *mut core::ffi::c_void {
     let vertex_memory = unsafe{core::mem::transmute::<*mut core::ffi::c_void, *mut T>(ptr)};
     unsafe{core::ptr::write_volatile(vertex_memory, object)};
@@ -120,238 +61,6 @@ fn push_quad_indices(ptr:*mut core::ffi::c_void, i:u16) -> *mut core::ffi::c_voi
     unsafe{push_type::<[u16;6]>(ptr, indices)}
 }
 
-fn new_locale(lang: &str, script: hb::hb_script_t, direction: hb::hb_direction_t) -> hb::hb_segment_properties_t {
-    // zero initialize struct (due to reserved fields in the c-struct)
-    let mut ret = unsafe{core::mem::MaybeUninit::<hb::hb_segment_properties_t>::zeroed().assume_init()};
-    ret.language = unsafe{hb::hb_language_from_string(lang.as_ptr() as *const i8, lang.len() as i32)};
-    ret.direction = direction;
-    ret.script = script;
-    return ret;
-}
-
-// freetype integration of harfbuzz_sys 0.6.1 is missing these bindings
-#[link(name="harfbuzz")]
-extern{
-    //fn hb_ft_font_get_face(hb_font: *mut hb::hb_font_t) -> ft::ffi::FT_Face;
-    fn hb_ft_font_set_funcs(hb_font: *mut hb::hb_font_t);
-    fn hb_ft_font_set_load_flags(hb_font: *mut hb::hb_font_t, load_flags: i32);
-    fn hb_ft_face_create(ft_face : ft::ffi::FT_Face, destroy : hb::hb_destroy_func_t) -> *mut hb::hb_face_t;
-    fn hb_ft_font_changed(font : *mut hb::hb_font_t);
-}
-
-#[derive(Copy,Clone)]
-struct GlyphCacheEntry{
-    u: u16,
-    v: u16,
-    left: i16,
-    top:  i16,
-    width: u16,
-    height: u16,
-}
-
-#[derive(Copy,Clone,Eq,Hash,PartialEq)]
-struct GlyphCacheKey{
-    font_idx  : u32,
-    glyph_idx : u32,
-    font_size : u32,
-    subpixel  : u32,
-    autohint  : bool,
-}
-
-struct GlyphCache{
-    map: HashMap<GlyphCacheKey,GlyphCacheEntry>,
-    tex_size:  u16,
-    current_x: u16,
-    current_y: u16,
-    max_y:     u16,
-}
-impl GlyphCache {
-    fn new(tex_size:u16) -> Self { Self { map: HashMap::new(), current_x:0, current_y:0, tex_size, max_y:0 } }
-    fn get(&self, key: &GlyphCacheKey) -> Option<GlyphCacheEntry> {
-        self.map.get(key).copied()
-    }
-    fn insert(&mut self, key:GlyphCacheKey, width: u16, height:u16, left: i16, top: i16) -> (u16,u16) {
-        if self.current_x+width >= self.tex_size {
-            self.current_x = 0;
-            self.current_y = self.max_y;
-        }
-        let ret = (self.current_x, self.current_y);
-        self.map.insert(key, GlyphCacheEntry{
-            u: ret.0, v: ret.1,
-            width, height, left, top
-        });
-        self.current_x += width;
-        self.max_y = self.max_y.max(self.current_y+height);
-        ret
-    }
-}
-
-fn gen_buffer_image_copy( buffer_offset: u64,
-                          pitch : u32,
-                          width : u32,
-                          height: u32,
-                          u: i32,
-                          v: i32) -> vk::BufferImageCopy {
-    vk::BufferImageCopy{
-        buffer_offset,
-        buffer_row_length: pitch,
-        buffer_image_height: 0,
-        image_offset: vk::Offset3D{x:u, y:v, z:0},
-        image_extent: vk::Extent3D{width, height, depth: 1},
-        image_subresource: vk::ImageSubresourceLayers{
-            layer_count: 1,
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_array_layer: 0,
-            mip_level: 0
-        }
-    }
-}
-
-#[derive(Default)]
-struct Text{
-    quads          : Vec<[Vertex;4]>,
-    buffer_updates : Vec<vk::BufferImageCopy>,
-    pixels         : Vec<u8>,
-}
-
-fn div_round(a:i32, b:i32) -> i32 { (a+(b/2))/b }
-
-#[derive(Clone)]
-struct Style<'a>{
-    font_idx: u32,
-    size:     u32,
-    weight:   u32,
-    color:    Color,
-    autohint: bool,
-    subpixel: i32,
-    features: &'a[hb::hb_feature_t],
-}
-
-struct TextRenderer{
-    glyph_cache: GlyphCache,
-    buffer:      *mut hb::hb_buffer_t,
-    ft_faces:    Vec<ft::Face>,
-    hb_fonts:    Vec<*mut hb::hb_font_t>,
-}
-
-// Text rendering can fundamentally not be cleanly separated into parts. Everything affects
-// everything else. This means the easiest thing to do is have a monolithic function that does
-// everything. It's better to have a monolithic function as API that can hide language
-// complexities, than have a complex API.
-//
-// next features: subpixel positioning and line-breaking
-fn render_line_of_text(
-        ret:         &mut Text,
-        renderer:    &mut TextRenderer,
-        locale:      &hb::hb_segment_properties_t,
-        style:       &Style,
-        start_position: vec2<i32>,
-        text:        &str){
-    use hb::*;
-    assert!(style.subpixel>=1);
-    assert!(style.subpixel<=64);
-
-    let hb_font =  renderer.hb_fonts[style.font_idx as usize];
-    let mut ft_face = &mut renderer.ft_faces[style.font_idx as usize];
-    ft_face.set_char_size(0, (style.size as isize)*64, 0, 0);
-
-
-    // TODO: assert that exactly 1 variable axis exists, and that it corresponds to font-weight
-    let mut amaster : *mut ft::ffi::FT_MM_Var = core::ptr::null_mut();
-    let var = (style.weight as i64) <<16;
-    unsafe{ft::ffi::FT_Set_Var_Design_Coordinates(ft_face.raw_mut(), 1, &var)};
-
-    unsafe{hb_ft_font_changed(hb_font)};
-    let load_flags = if style.autohint { ft::face::LoadFlag::FORCE_AUTOHINT } else { ft::face::LoadFlag::NO_AUTOHINT };
-    unsafe{hb_ft_font_set_load_flags(hb_font, load_flags.bits())};
-
-    unsafe{
-        hb_buffer_reset(renderer.buffer);
-        hb_buffer_add_utf8(renderer.buffer, text.as_ptr() as *const i8, text.len() as i32, 0, -1);
-        hb_buffer_set_segment_properties(renderer.buffer, locale);
-        hb_shape(hb_font, renderer.buffer, if style.features.len()==0 {core::ptr::null()} else {style.features.as_ptr()}, style.features.len() as u32);
-    };
-
-    let mut glyph_info_count = 0;
-    let glyph_info_ptr = unsafe{hb_buffer_get_glyph_infos(renderer.buffer, &mut glyph_info_count)};
-    let glyph_infos = unsafe{core::slice::from_raw_parts_mut(glyph_info_ptr, glyph_info_count as usize)};
-
-    let mut glyph_pos_count = 0;
-    let glyph_pos_ptr = unsafe{hb_buffer_get_glyph_positions(renderer.buffer, &mut glyph_pos_count)};
-    let glyph_positons = unsafe{core::slice::from_raw_parts_mut(glyph_pos_ptr, glyph_pos_count as usize)};
-
-    assert_eq!(glyph_info_count, glyph_pos_count);
-
-    let mut cursor = start_position;
-    for (info,pos) in std::iter::zip(glyph_infos, glyph_positons) {
-        let id = info.codepoint; // actually glyph index, not codepoint
-        let x = div_round((cursor.0 + pos.x_offset)*style.subpixel, 64);
-        let y = div_round((cursor.1 + pos.y_offset), 64);
-        let x_frac = x%style.subpixel;
-        let x = x/style.subpixel;
-
-        let frac64 = (x_frac*64/style.subpixel) as u32;
-        //println!("{x:4}+{x_frac:2}/{:2} = {frac64:2}/64", style.subpixel);
-
-        if let Some(entry) = renderer.glyph_cache.get(&GlyphCacheKey{font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}) {
-            if !(entry.width<=0 || entry.height<=0) { // invisible character, ignore for rendering
-                ret.quads.push(
-                    gen_quad(x as i16 + entry.left,
-                             y as i16 - entry.top,
-                             entry.width  as i16, 
-                             entry.height as i16,
-                             entry.u, entry.v,
-                             style.color));
-            }
-        }else{
-            ft_face.load_glyph(id, load_flags);
-            let subpixel_offset = Some(ft::Vector{x:frac64 as i64, y:0});
-            let glyph  = ft_face.glyph().get_glyph().unwrap().to_bitmap(ft::render_mode::RenderMode::Lcd, subpixel_offset).unwrap();
-            let bitmap = glyph.bitmap();
-            let width_sub  = bitmap.width();
-            let width = width_sub/3;
-            let height = bitmap.rows();
-            let pitch  = bitmap.pitch();
-            let left   = glyph.left();
-            let top    = glyph.top();
-            if !(width<=0 || height<=0) { 
-                assert_eq!(ret.pixels.len()%4, 0);
-                let buffer_offset = ret.pixels.len() as u64;
-                let uv = renderer.glyph_cache.insert( GlyphCacheKey{ font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}, 
-                                                      width as u16, height as u16, left as i16, top as i16);
-                // convert to tightly-packed rgba
-                let bitmap_buffer = bitmap.buffer();
-                let mut pixel_counter = 0;
-                for h in 0..height {
-                    for w in 0..width_sub {
-                        ret.pixels.push(bitmap_buffer[(h*pitch + w) as usize]);
-                        if pixel_counter%3==2 { 
-                            ret.pixels.push(0xFF);
-                        }
-                        pixel_counter += 1;
-                    }
-                }
-                
-                ret.quads.push(
-                    gen_quad((x+left) as i16,
-                             (y-top)  as i16,
-                             width as i16, height as i16,
-                             uv.0, uv.1,
-                             style.color));
-                ret.buffer_updates.push(
-                    gen_buffer_image_copy(
-                        buffer_offset,
-                        0 as u32, width as u32, height as u32,
-                        uv.0 as i32,
-                        uv.1 as i32));
-            }
-        }
-
-        cursor.0 += pos.x_advance;
-        cursor.1 += pos.y_advance;
-    }
-}
-
 #[derive(Default)]
 enum App{
     #[default] Uninitialized,
@@ -364,7 +73,7 @@ enum App{
         pipeline_layout : vk::PipelineLayout,
         descriptor_set : vk::DescriptorSet,
         image : vk::Image,
-        text_renderer : TextRenderer,
+        text_engine : TextEngine,
     },
 }
 impl ApplicationHandler for App {
@@ -372,50 +81,15 @@ impl ApplicationHandler for App {
         match self {
             App::Resumed{..}    => todo!("handle re-resuming"),
             App::Uninitialized => {
-                let freetype_lib  = ft::Library::init().expect("failed to initialize freetype");
-
-                // let mut ft_face = freetype_lib.new_face("./fonts/source-sans/upright.otf", 0).expect("could not find font");
-                // let mut hb_face = unsafe{ hb_ft_face_create(ft_face.raw_mut(), None) };
-                // let hb_font = unsafe{hb::hb_font_create(hb_face)};
-
-                let mut hb_fonts = vec![];
-                let mut ft_faces = vec![
-                    freetype_lib.new_face("./fonts/source-sans/upright.ttf", 0).expect("could not find font"),
-                    freetype_lib.new_face("./fonts/source-sans/italic.ttf",  0).expect("could not find font"),
-                    freetype_lib.new_face("./fonts/crimson-pro/upright.ttf", 0).expect("could not find font"),
-                    freetype_lib.new_face("./fonts/crimson-pro/italic.ttf",  0).expect("could not find font"),
-                ];
-                for ft_face in &mut ft_faces {
-                    let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face.raw_mut())};
-                    //unsafe{hb_ft_font_set_funcs(hb_font)};
-                    //unsafe{hb_ft_font_set_load_flags(hb_font, (ft::face::LoadFlag::FORCE_AUTOHINT).bits())};
-                    hb_fonts.push(hb_font);
-                }
-
+                let glyph_cache_size = 1<<10;
                 let glyph_cache_format = vk::Format::R8G8B8A8_UNORM;
-                let glyph_cache_size   = 1<<10;
-                let mut text_renderer = TextRenderer{
-                    buffer: unsafe{hb::hb_buffer_create()},
-                    ft_faces, hb_fonts,
-                    glyph_cache: GlyphCache::new(glyph_cache_size as u16),
-                };
 
-                // let mut ft_face2 = ft_face.clone();
-                // ft_face2.set_char_size(0, 24*64, 0, 0);
-                // let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face2.raw_mut())};
-                // unsafe{hb_ft_font_set_funcs(hb_font)};
-                // unsafe{hb_ft_font_set_load_flags(hb_font, (ft::face::LoadFlag::FORCE_AUTOHINT).bits())};
-
-                // let hb_face = unsafe{hb_font_get_face(hb_font)};
-                // let count = unsafe{hb::hb_ot_var_get_axis_count(hb_face)};
-                // let tag_wght = unsafe{ hb::hb_tag_from_string("wght".as_ptr() as *const i8, 4)};
-                // let mut axis_info = unsafe{core::mem::MaybeUninit::<hb::hb_ot_var_axis_info_t>::zeroed().assume_init()};
-                // if unsafe{hb::hb_ot_var_find_axis_info(hb_face, tag_wght, &mut axis_info)} >= 0 {
-                //     let weight =  500.0f32.clamp(axis_info.min_value, axis_info.max_value);
-                //     println!("has weight! {}<={}<={}", axis_info.min_value, weight, axis_info.max_value );
-                //     let weight_data = hb::hb_variation_t{ tag: tag_wght, value: weight };
-                //     unsafe{hb_font_set_variations(hb_font, &weight_data, 1)};
-                // }
+                let text_engine = TextEngine::new(glyph_cache_size, &[
+                    "./fonts/source-sans/upright.ttf",
+                    "./fonts/source-sans/italic.ttf",
+                    "./fonts/crimson-pro/upright.ttf",
+                    "./fonts/crimson-pro/italic.ttf",
+                ]);
 
                 let init_start = std::time::Instant::now();
                 let renderer = renderer::Renderer::new(event_loop);
@@ -433,7 +107,7 @@ impl ApplicationHandler for App {
                 // create texture image
                 let img_info = vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
-                    .extent(vk::Extent3D{width:glyph_cache_size, height:glyph_cache_size, depth:1})
+                    .extent(vk::Extent3D{width:glyph_cache_size as u32, height:glyph_cache_size as u32, depth:1})
                     .mip_levels(1)
                     .array_layers(1)
                     .format(glyph_cache_format)
@@ -552,7 +226,7 @@ impl ApplicationHandler for App {
                 println!("{:>13?} renderer new", init_render-init_start);
                 println!("{:>13?} post renderer", init_end-init_render);
                 println!("{:>13?} total init", init_end-init_start);
-                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, text_renderer};
+                *self = App::Resumed{ renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, text_engine};
             },
         }
     }
@@ -564,7 +238,7 @@ impl ApplicationHandler for App {
                 event_loop.exit()
             },
             WindowEvent::RedrawRequested => {
-                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, text_renderer} = self else { panic!("not active!") };
+                let App::Resumed{renderer,vs,fs,bar_buffer,bar_memory, pipeline_layout, descriptor_set, image, text_engine} = self else { panic!("not active!") };
                 println!("================================================================================");
                 let winsize = renderer.window.inner_size();
                 let win_w = winsize.width as f32;
@@ -574,13 +248,13 @@ impl ApplicationHandler for App {
                 let mut frame = renderer.wait_for_frame();
 
 
-                let english = new_locale("en", hb::HB_SCRIPT_LATIN, hb::HB_DIRECTION_LTR);
+                let english = TextEngine::new_locale("en", hb::HB_SCRIPT_LATIN, hb::HB_DIRECTION_LTR);
                 let mut text = Text::default();
 
-                let gb_light = Color{r:0xF2, g:0xe5, b:0xbc, a:0xFF };
-                let gb_aqua  = Color{r:0x8e, g:0xc0, b:0x7c, a:0xFF };
-                let gb_red   = Color{r:0xfb, g:0x49, b:0x34, a:0xFF };
-                let gb_yellow= Color{r:0xfa, g:0xbd, b:0x2f, a:0xFF };
+                let gb_light = Color::srgb8(0xF2, 0xe5, 0xbc, 0xFF);
+                let gb_aqua  = Color::srgb8(0x8e, 0xc0, 0x7c, 0xFF);
+                let gb_red   = Color::srgb8(0xfb, 0x49, 0x34, 0xFF);
+                let gb_yellow= Color::srgb8(0xfa, 0xbd, 0x2f, 0xFF);
                 let color = gb_aqua;
                 let features = &[];
                 let subpixel = 8;
@@ -595,23 +269,23 @@ impl ApplicationHandler for App {
                 let style_h2  = Style{ features, color:gb_light, subpixel,   autohint: false, font_idx: 3, size: 48, weight: 250 };
 
                 let mut cursor = vec2(50,50)*64;
-                render_line_of_text(&mut text, text_renderer, &english, &style_h1, cursor, "Hello, World! 48pt");
+                text_engine.render_line_of_text(&mut text, &english, &style_h1, cursor, "Hello, World! 48pt");
                 cursor.1 += 30*64;
-                render_line_of_text(&mut text, text_renderer, &english, &style_s1, cursor, "This is an example of an italic sentence. This is set at 21pts");
-                cursor.1 += 30*64;
-
-                render_line_of_text(&mut text, text_renderer, &english, &style_s2h,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. A");
-                cursor.1 += 20*64;
-                render_line_of_text(&mut text, text_renderer, &english, &style_s2, cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. B");
-                cursor.1 += 20*64;
-                render_line_of_text(&mut text, text_renderer, &english, &style_s2s,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. C");
+                text_engine.render_line_of_text(&mut text, &english, &style_s1, cursor, "This is an example of an italic sentence. This is set at 21pts");
                 cursor.1 += 30*64;
 
-                render_line_of_text(&mut text, text_renderer, &english, &style_s3, cursor, "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font.");
+                text_engine.render_line_of_text(&mut text, &english, &style_s2h,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. A");
+                cursor.1 += 20*64;
+                text_engine.render_line_of_text(&mut text, &english, &style_s2, cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. B");
+                cursor.1 += 20*64;
+                text_engine.render_line_of_text(&mut text, &english, &style_s2s,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. C");
+                cursor.1 += 30*64;
+
+                text_engine.render_line_of_text(&mut text, &english, &style_s3, cursor, "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font.");
                 cursor.1 += 50*64;
-                render_line_of_text(&mut text, text_renderer, &english, &style_h2, cursor, "And it has absolutely kick-ass italics.");
+                text_engine.render_line_of_text(&mut text, &english, &style_h2, cursor, "And it has absolutely kick-ass italics.");
                 cursor.1 += 20*64;
-                text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_renderer.glyph_cache.current_x as i16, 50, 0, 0, gb_yellow)); // debug: visualize glyph_cache
+                //text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_engine.glyph_cache.current_x as i16, 50, 0, 0, gb_yellow)); // debug: visualize glyph_cache
 
                 // copy text into bar memory
                 let mut bar_ptr = *bar_memory;
