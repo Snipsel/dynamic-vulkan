@@ -20,6 +20,24 @@ use ash::{
 };
 use bitflags::bitflags;
 
+fn gen_buffer_image_copy(ptr_offset:u64, buffer_image_copy: BufferImageCopy) -> vk::BufferImageCopy {
+    let BufferImageCopy { buffer_offset, width, height, u, v } = buffer_image_copy;
+    vk::BufferImageCopy{
+        buffer_offset: buffer_offset+ptr_offset,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image_offset: vk::Offset3D{x:u, y:v, z:0},
+        image_extent: vk::Extent3D{width, height, depth: 1},
+        image_subresource: vk::ImageSubresourceLayers{
+            layer_count: 1,
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_array_layer: 0,
+            mip_level: 0
+        }
+    }
+}
+
+
 fn begin_oneshot_cmd(renderer: &renderer::Renderer) -> vk::CommandBuffer {
     let alloc_info = vk::CommandBufferAllocateInfo::default()
         .level(vk::CommandBufferLevel::PRIMARY)
@@ -310,11 +328,9 @@ impl ApplicationHandler for App {
                 let buffer_end = bar_ptr;
 
                 // add pixel offset to the buffers
-                for mut update in &mut text.buffer_updates {
-                    update.buffer_offset += pixel_buffer_offset;
-                }
+                let buffer_updates :Vec<vk::BufferImageCopy> = text.buffer_updates.into_iter().map(move|buffer_image_copy|gen_buffer_image_copy(pixel_buffer_offset,buffer_image_copy)).collect();
 
-                frame.buffer_to_image(*bar_buffer, *image, &text.buffer_updates);
+                frame.buffer_to_image(*bar_buffer, *image, &buffer_updates);
 
                 frame.begin_rendering([(0x32 as f32/0xFF as f32).powf(2.2),
                                        (0x30 as f32/0xFF as f32).powf(2.2),

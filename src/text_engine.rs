@@ -2,7 +2,6 @@ use freetype as ft;
 use harfbuzz_sys as hb;
 use hb::{freetype::hb_ft_font_create_referenced, hb_face_create, hb_font_get_face, hb_font_set_variations, hb_language_t};
 use std::collections::HashMap;
-use ash::vk;
 use crate::common::{Color,Vertex,vec2,div_round,gen_quad};
 
 // freetype integration of harfbuzz_sys 0.6.1 is missing these bindings
@@ -15,25 +14,12 @@ extern{
     fn hb_ft_font_changed(font : *mut hb::hb_font_t);
 }
 
-fn gen_buffer_image_copy( buffer_offset: u64,
-                          pitch : u32,
-                          width : u32,
-                          height: u32,
-                          u: i32,
-                          v: i32) -> vk::BufferImageCopy {
-    vk::BufferImageCopy{
-        buffer_offset,
-        buffer_row_length: pitch,
-        buffer_image_height: 0,
-        image_offset: vk::Offset3D{x:u, y:v, z:0},
-        image_extent: vk::Extent3D{width, height, depth: 1},
-        image_subresource: vk::ImageSubresourceLayers{
-            layer_count: 1,
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_array_layer: 0,
-            mip_level: 0
-        }
-    }
+pub struct BufferImageCopy{
+    pub buffer_offset: u64,
+    pub width : u32,
+    pub height: u32,
+    pub u: i32,
+    pub v: i32
 }
 
 #[derive(Clone)]
@@ -98,7 +84,7 @@ impl GlyphCache {
 #[derive(Default)]
 pub struct Text{
     pub quads          : Vec<[Vertex;4]>,
-    pub buffer_updates : Vec<vk::BufferImageCopy>,
+    pub buffer_updates : Vec<BufferImageCopy>,
     pub pixels         : Vec<u8>,
 }
 
@@ -274,11 +260,12 @@ impl TextEngine {
                                  uv.0, uv.1,
                                  style.color));
                     ret.buffer_updates.push(
-                        gen_buffer_image_copy(
+                        BufferImageCopy{
                             buffer_offset,
-                            0 as u32, width as u32, height as u32,
-                            uv.0 as i32,
-                            uv.1 as i32));
+                            width:  width as u32,
+                            height: height as u32,
+                            u: uv.0 as i32,
+                            v: uv.1 as i32 });
                 }
             }
 
