@@ -1,8 +1,5 @@
 #![allow(unused)]
-mod common;
 use common::{Color,Vertex,vec2,div_round};
-mod renderer;
-mod text_engine;
 use text_engine::*;
 
 use std::{

@@ -2,7 +2,7 @@ use freetype as ft;
 use harfbuzz_sys as hb;
 use hb::{freetype::hb_ft_font_create_referenced, hb_face_create, hb_font_get_face, hb_font_set_variations, hb_language_t};
 use std::collections::HashMap;
-use crate::common::{Color,Vertex,vec2,div_round,gen_quad};
+use common::{Color,Vertex,vec2,div_round,gen_quad};
 
 // freetype integration of harfbuzz_sys 0.6.1 is missing these bindings
 #[link(name="harfbuzz")]

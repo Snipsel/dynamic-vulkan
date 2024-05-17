@@ -1,0 +1,9 @@
+[package]
+name = "text-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+harfbuzz-sys = {version="0.6.1", features=['freetype']}
+freetype-rs = "0.36"

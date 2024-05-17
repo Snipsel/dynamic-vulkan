@@ -3,6 +3,13 @@ name = "dynamic-renderer"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = [
+    "common",
+    "renderer",
+    "text-engine"
+]
+
 [profile.dev]
 panic="abort"
 
@@ -11,10 +18,10 @@ panic="abort"
 strip="symbols"
 
 [dependencies]
-harfbuzz-sys = {version="0.6.1", features=['freetype']}
-freetype-rs = "0.36"
+common      = { path = "common" }
+renderer    = { path = "renderer" }
+text-engine = { path = "text-engine" }
 raw-window-handle = "0.6"
-shaderc     = {version="0.8", optional = false} # in future: make optional dependency
 winit       = "0.30"
 ash         = "0.38"
 bitflags    = "2"
