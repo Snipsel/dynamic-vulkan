@@ -1,10 +1,7 @@
-#![allow(unused)]
-use common::{Color,Vertex,vec2,div_round};
+use common::{Color,Vertex,vec2};
 use text_engine::*;
 
-use std::{
-    collections::HashMap, ffi::{CStr,OsStr}, fmt, mem::size_of, ptr
-};
+use core::{ mem::{transmute,size_of}, ptr::write_volatile, ffi::c_void };
 use ash::vk;
 use winit::{
     application::ApplicationHandler,
@@ -31,18 +28,14 @@ fn gen_buffer_image_copy(ptr_offset:u64, buffer_image_copy: BufferImageCopy) -> 
     }
 }
 
-unsafe fn push_type<T>(ptr:*mut core::ffi::c_void, object:T) -> *mut core::ffi::c_void {
-    let vertex_memory = unsafe{core::mem::transmute::<*mut core::ffi::c_void, *mut T>(ptr)};
-    unsafe{core::ptr::write_volatile(vertex_memory, object)};
-    let t_size = std::mem::size_of::<T>() as isize;
+unsafe fn push_type<T>(ptr:*mut c_void, object:T) -> *mut c_void {
+    let vertex_memory = unsafe{transmute::<*mut c_void, *mut T>(ptr)};
+    unsafe{write_volatile(vertex_memory, object)};
+    let t_size = size_of::<T>() as isize;
     unsafe{ptr.byte_offset(t_size)}
 }
 
-fn push_quad_verts(ptr:*mut core::ffi::c_void, verts: [Vertex;4]) -> *mut core::ffi::c_void {
-    unsafe{push_type::<[Vertex;4]>(ptr, verts)}
-}
-
-fn push_quad_indices(ptr:*mut core::ffi::c_void, i:u16) -> *mut core::ffi::c_void {
+fn push_quad_indices(ptr:*mut c_void, i:u16) -> *mut c_void {
     let indices = [ i+0, i+1, i+2, i+2, i+1, i+3 ];
     unsafe{push_type::<[u16;6]>(ptr, indices)}
 }
@@ -56,7 +49,7 @@ enum App{
         vs : vk::ShaderEXT,
         fs : vk::ShaderEXT,
         bar_buffer : vk::Buffer,
-        bar_memory : *mut core::ffi::c_void,
+        bar_memory : *mut c_void,
         pipeline_layout : vk::PipelineLayout,
         descriptor_set : vk::DescriptorSet,
         image : vk::Image,
@@ -68,6 +61,9 @@ impl ApplicationHandler for App {
         match self {
             App::Resumed{..}    => todo!("handle re-resuming"),
             App::Uninitialized => {
+                use std::time::Instant;
+                let init_start = Instant::now();
+
                 let glyph_cache_size = 1<<10;
                 let glyph_cache_format = vk::Format::R8G8B8A8_UNORM;
 
@@ -77,20 +73,19 @@ impl ApplicationHandler for App {
                     "./fonts/crimson-pro/upright.ttf",
                     "./fonts/crimson-pro/italic.ttf",
                 ]);
-
-                let init_start = std::time::Instant::now();
+                let init_text_engine = Instant::now();
 
                 let window = event_loop.create_window(Window::default_attributes()).expect("could not create window");
                 let raw_window  = window.window_handle().unwrap().as_raw();
                 let raw_display = window.display_handle().unwrap().as_raw();
                 let renderer = renderer::Renderer::new(raw_window, raw_display);
-                let init_render = std::time::Instant::now();
+                let init_render = Instant::now();
 
                 renderer.debug_print();
                 let push_constant_ranges = [
                     vk::PushConstantRange::default()
                         .stage_flags(vk::ShaderStageFlags::VERTEX)
-                        .size(core::mem::size_of::<[f32;4]>() as u32) ];
+                        .size(size_of::<[f32;4]>() as u32) ];
                 //let binding_flag_bits = [vk::DescriptorBindingFlagsEXT::UPDATE_AFTER_BIND];
                 //let mut binding_flags = vk::DescriptorSetLayoutBindingFlagsCreateInfoEXT::default()
                 //    .binding_flags(&binding_flag_bits);
@@ -155,10 +150,11 @@ impl ApplicationHandler for App {
 
                 println!("initialized!!");
 
-                let init_end = std::time::Instant::now();
-                println!("{:>13?} renderer new", init_render-init_start);
+                let init_end = Instant::now();
+                println!("{:>13?} text engine",   init_text_engine-init_start);
+                println!("{:>13?} renderer new",  init_render-init_text_engine);
                 println!("{:>13?} post renderer", init_end-init_render);
-                println!("{:>13?} total init", init_end-init_start);
+                println!("{:>13?} total init",    init_end-init_start);
                 *self = App::Resumed{ window, renderer, vs, fs, bar_buffer, bar_memory, pipeline_layout, descriptor_set, image, text_engine};
             },
         }
@@ -220,7 +216,7 @@ impl ApplicationHandler for App {
 
                 // copy text into bar memory
                 let mut bar_ptr = *bar_memory;
-                let vertex_start = bar_ptr;
+                let _vertex_start = bar_ptr;
                 let quad_count = text.quads.len();
                 for quads in text.quads {
                     bar_ptr = unsafe{push_type::<[Vertex;4]>(bar_ptr, quads)};
@@ -238,10 +234,10 @@ impl ApplicationHandler for App {
                 assert_eq!(pixel_buffer_offset%4,0);
                 for b in text.pixels.iter() {
                     // inefficient?
-                    unsafe{core::mem::transmute::<*mut core::ffi::c_void, *mut u8>(bar_ptr).write_volatile(*b);}
+                    unsafe{transmute::<*mut c_void, *mut u8>(bar_ptr).write_volatile(*b);}
                     bar_ptr = unsafe{bar_ptr.byte_add(1)};
                 }
-                let buffer_end = bar_ptr;
+                let _buffer_end = bar_ptr;
 
                 // add pixel offset to the buffers
                 let buffer_updates :Vec<vk::BufferImageCopy> = text.buffer_updates.into_iter().map(move|buffer_image_copy|gen_buffer_image_copy(pixel_buffer_offset,buffer_image_copy)).collect();
@@ -255,7 +251,7 @@ impl ApplicationHandler for App {
                 frame.bind_vs_fs(*vs, *fs);
                 frame.bind_vertex_buffer(*bar_buffer);
                 frame.bind_index_buffer(*bar_buffer, index_buffer_offset);
-                frame.set_vertex_input(core::mem::size_of::<Vertex>() as u32, &[
+                frame.set_vertex_input(size_of::<Vertex>() as u32, &[
                     (0, vk::Format::R16G16_SINT),
                     (4, vk::Format::R16G16_UINT),
                     (8, vk::Format::R8G8B8A8_UNORM),
