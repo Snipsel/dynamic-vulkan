@@ -8,9 +8,6 @@ use text_engine::*;
 use std::{
     collections::HashMap, ffi::{CStr,OsStr}, fmt, mem::size_of, ptr
 };
-use freetype as ft;
-use harfbuzz_sys as hb;
-use hb::{freetype::hb_ft_font_create_referenced, hb_face_create, hb_font_get_face, hb_font_set_variations, hb_language_t};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -248,7 +245,7 @@ impl ApplicationHandler for App {
                 let mut frame = renderer.wait_for_frame();
 
 
-                let english = TextEngine::new_locale("en", hb::HB_SCRIPT_LATIN, hb::HB_DIRECTION_LTR);
+                let english = Locale::new("en", Script::LATIN, Direction::LeftToRight);
                 let mut text = Text::default();
 
                 let gb_light = Color::srgb8(0xF2, 0xe5, 0xbc, 0xFF);
