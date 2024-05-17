@@ -160,20 +160,28 @@ struct GlyphCacheKey{
 
 struct GlyphCache{
     map: HashMap<GlyphCacheKey,GlyphCacheEntry>,
+    tex_size:  u16,
     current_x: u16,
+    current_y: u16,
+    max_y:     u16,
 }
 impl GlyphCache {
-    fn new() -> Self { Self { map: HashMap::new(), current_x:0 } }
+    fn new(tex_size:u16) -> Self { Self { map: HashMap::new(), current_x:0, current_y:0, tex_size, max_y:0 } }
     fn get(&self, key: &GlyphCacheKey) -> Option<GlyphCacheEntry> {
         self.map.get(key).copied()
     }
     fn insert(&mut self, key:GlyphCacheKey, width: u16, height:u16, left: i16, top: i16) -> (u16,u16) {
-        let ret = (self.current_x, 0);
+        if self.current_x+width >= self.tex_size {
+            self.current_x = 0;
+            self.current_y = self.max_y;
+        }
+        let ret = (self.current_x, self.current_y);
         self.map.insert(key, GlyphCacheEntry{
             u: ret.0, v: ret.1,
             width, height, left, top
         });
         self.current_x += width;
+        self.max_y = self.max_y.max(self.current_y+height);
         ret
     }
 }
@@ -283,7 +291,7 @@ fn render_line_of_text(
         let x = x/style.subpixel;
 
         let frac64 = (x_frac*64/style.subpixel) as u32;
-        //println!("{x:4}+{x_frac:2}/{style.subpixel:2} = {frac64:2}/64");
+        //println!("{x:4}+{x_frac:2}/{:2} = {frac64:2}/64", style.subpixel);
 
         if let Some(entry) = renderer.glyph_cache.get(&GlyphCacheKey{font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}) {
             if !(entry.width<=0 || entry.height<=0) { // invisible character, ignore for rendering
@@ -384,10 +392,12 @@ impl ApplicationHandler for App {
                     hb_fonts.push(hb_font);
                 }
 
+                let glyph_cache_format = vk::Format::R8G8B8A8_UNORM;
+                let glyph_cache_size   = 1<<10;
                 let mut text_renderer = TextRenderer{
                     buffer: unsafe{hb::hb_buffer_create()},
                     ft_faces, hb_fonts,
-                    glyph_cache: GlyphCache::new(),
+                    glyph_cache: GlyphCache::new(glyph_cache_size as u16),
                 };
 
                 // let mut ft_face2 = ft_face.clone();
@@ -419,9 +429,6 @@ impl ApplicationHandler for App {
                 //let binding_flag_bits = [vk::DescriptorBindingFlagsEXT::UPDATE_AFTER_BIND];
                 //let mut binding_flags = vk::DescriptorSetLayoutBindingFlagsCreateInfoEXT::default()
                 //    .binding_flags(&binding_flag_bits);
-
-                let glyph_cache_format = vk::Format::R8G8B8A8_UNORM;
-                let glyph_cache_size   = 1<<14;
 
                 // create texture image
                 let img_info = vk::ImageCreateInfo::default()
@@ -580,9 +587,9 @@ impl ApplicationHandler for App {
                 let style_h1  = Style{ features, color:gb_light, subpixel,   autohint: false, font_idx: 0, size: 48, weight: 300 };
                 let style_s1  = Style{ features, color, subpixel,   autohint: false, font_idx: 1, size: 21, weight: 400 };
 
-                let style_s2  = Style{ features, color:gb_red, subpixel,   autohint: false, font_idx: 0, size: 16, weight: 400 };
-                let style_s2s = Style{ features, color:gb_red, subpixel:1, autohint: false, font_idx: 0, size: 16, weight: 400 };
-                let style_s2h = Style{ features, color:gb_red, subpixel,   autohint: true,  font_idx: 0, size: 16, weight: 400 };
+                let style_s2  = Style{ features, color:gb_red, subpixel,   autohint: false, font_idx: 0, size: 12, weight: 400 };
+                let style_s2s = Style{ features, color:gb_red, subpixel:1, autohint: false, font_idx: 0, size: 12, weight: 400 };
+                let style_s2h = Style{ features, color:gb_red, subpixel,   autohint: true,  font_idx: 0, size: 12, weight: 400 };
 
                 let style_s3  = Style{ features, color:gb_yellow, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 300 };
                 let style_h2  = Style{ features, color:gb_light, subpixel,   autohint: false, font_idx: 3, size: 48, weight: 250 };
@@ -592,12 +599,14 @@ impl ApplicationHandler for App {
                 cursor.1 += 30*64;
                 render_line_of_text(&mut text, text_renderer, &english, &style_s1, cursor, "This is an example of an italic sentence. This is set at 21pts");
                 cursor.1 += 30*64;
-                render_line_of_text(&mut text, text_renderer, &english, &style_s2h,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts. A");
+
+                render_line_of_text(&mut text, text_renderer, &english, &style_s2h,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. A");
                 cursor.1 += 20*64;
-                render_line_of_text(&mut text, text_renderer, &english, &style_s2, cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts. B");
+                render_line_of_text(&mut text, text_renderer, &english, &style_s2, cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. B");
                 cursor.1 += 20*64;
-                render_line_of_text(&mut text, text_renderer, &english, &style_s2s,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 16pts. C");
+                render_line_of_text(&mut text, text_renderer, &english, &style_s2s,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. C");
                 cursor.1 += 30*64;
+
                 render_line_of_text(&mut text, text_renderer, &english, &style_s3, cursor, "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font.");
                 cursor.1 += 50*64;
                 render_line_of_text(&mut text, text_renderer, &english, &style_h2, cursor, "And it has absolutely kick-ass italics.");
