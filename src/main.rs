@@ -174,7 +174,6 @@ impl ApplicationHandler for App {
                 let win_h = winsize.height as f32;
 
                 let english = Locale::new("en", Script::LATIN, Direction::LeftToRight);
-                let mut text = Text::default();
 
                 let gb_light = Color::srgb8(0xF2, 0xe5, 0xbc, 0xFF);
                 let gb_aqua  = Color::srgb8(0x8e, 0xc0, 0x7c, 0xFF);

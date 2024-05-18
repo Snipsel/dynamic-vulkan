@@ -159,61 +159,103 @@ fn is_mandatory_linebreak(c: char) -> bool {
 }
 
 
-// right now single-threaded, but in future per-thread state
-// OPEN QUESTION: should we expose ICU?
-pub struct TextEngine{
-    _freetype_lib: ft::Library,
-    glyph_cache: GlyphCache, 
-    buffer:      *mut hb::hb_buffer_t,
-    ft_faces:    Vec<ft::Face>,
-    hb_fonts:    Vec<*mut hb::hb_font_t>,
+struct Font{
+    ft_face: ft::Face,
+    hb_font: *mut hb::hb_font_t, // hb_font_t is an opaque type
 }
-impl TextEngine {
-    pub fn new(glyph_texture_size:u16, fontfiles: &[&str]) -> Self {
-        let freetype_lib = ft::Library::init().expect("failed to initialize freetype");
-        let mut hb_fonts = Vec::new();
-        let mut ft_faces = Vec::new();
-        for file in fontfiles {
-            ft_faces.push(freetype_lib.new_face(file, 0).expect("could not find font"));
-        }
-        for ft_face in &mut ft_faces {
-            let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face.raw_mut())};
-            hb_fonts.push(hb_font);
-        }
-        TextEngine{
-            _freetype_lib: freetype_lib,
-            buffer: unsafe{hb::hb_buffer_create()},
-            ft_faces, hb_fonts,
-            glyph_cache: GlyphCache::new(glyph_texture_size),
-        }
+impl Font{
+    fn from_path(lib: &ft::Library, path: &str) -> Self {
+        let mut ft_face = lib.new_face(path, 0).expect("could not find font");
+        let hb_font = unsafe{hb::freetype::hb_ft_font_create_referenced(ft_face.raw_mut())};
+        Self{ ft_face, hb_font }
     }
-
-    fn set_style_for_font(&mut self, style: &Style){
+    fn apply_style(&mut self, style: &Style){
         use hb::*;
         assert!(style.subpixel>=1);
         assert!(style.subpixel<=64);
 
-        let hb_font = self.hb_fonts[style.font_idx as usize];
-        let ft_face = &mut self.ft_faces[style.font_idx as usize];
-        ft_face.set_char_size(0, (style.size as isize)*64, 0, 0).unwrap();
+        self.ft_face.set_char_size(0, (style.size as isize)*64, 0, 0).unwrap();
 
         // TODO: assert that exactly 1 variable axis exists, and that it corresponds to font-weight
         let var = (style.weight as i64) <<16;
-        unsafe{ft::ffi::FT_Set_Var_Design_Coordinates(ft_face.raw_mut(), 1, &var)};
+        unsafe{ft::ffi::FT_Set_Var_Design_Coordinates(self.ft_face.raw_mut(), 1, &var)};
 
-        unsafe{hb_ft_font_changed(hb_font)};
-        unsafe{hb_ft_font_set_load_flags(hb_font, style.load_flags().bits())};
+        unsafe{hb_ft_font_changed(self.hb_font)};
+        unsafe{hb_ft_font_set_load_flags(self.hb_font, style.load_flags().bits())};
+    }
+}
+
+// right now single-threaded, but in future per-thread state
+// OPEN QUESTION: should we expose ICU? optional feature?
+pub struct TextEngine{
+    _freetype_lib: ft::Library,
+    glyph_cache: GlyphCache, 
+    buffer:      *mut hb::hb_buffer_t,
+    fonts:       Vec<Font>,
+}
+impl TextEngine {
+    pub fn new(glyph_texture_size:u16, font_file_paths: &[&str]) -> Self {
+        let freetype_lib = ft::Library::init().expect("failed to initialize freetype");
+        let mut fonts = Vec::with_capacity(font_file_paths.len());
+        for path in font_file_paths {
+            fonts.push(Font::from_path(&freetype_lib, path));
+        }
+        TextEngine{
+            _freetype_lib: freetype_lib,
+            buffer: unsafe{hb::hb_buffer_create()},
+            fonts,
+            glyph_cache: GlyphCache::new(glyph_texture_size),
+        }
     }
 
-    // warning: set_style_for_font MUST be called before this
+    pub fn render_text(  &mut self,
+            cursor:      &mut vec2<i32>,
+            _left:       i32,
+            _right:      i32,
+            styled_text: &[(&Locale,&Style,&str)]) -> Text {
+        use hb::*;
+        let mut ret = Text{
+            quads: Vec::new(),
+            buffer_updates: Vec::new(),
+            pixels: Vec::new(),
+        };
+
+        let line_segmenter = icu::segmenter::LineSegmenter::new_dictionary();
+        let mut cat = String::new();
+        for (_,_,text) in styled_text {
+            cat.push_str(text);
+        }
+
+        for i in line_segmenter.segment_str(&cat) {
+            if i==0 || i==cat.len() { continue };
+            let break_char = cat.chars().nth(i-1).unwrap();
+            let is_mandatory = is_mandatory_linebreak(break_char);
+            println!("line-break {i:3}: mandatory: {is_mandatory}");
+        }
+
+        for (locale,style,text) in styled_text.into_iter() {
+            let font = &mut self.fonts[style.font_idx as usize];
+            font.apply_style(style);
+            let features = style.features();
+            let shaped_glyphs = self.shape_text_run(locale, style.font_idx, &features, text);
+            for (info,pos) in shaped_glyphs {
+                self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
+                cursor.0 += pos.x_advance;
+                cursor.1 += pos.y_advance;
+            }
+        }
+        return ret;
+    }
+
+    // warning: must call font::apply_style before this
     fn shape_text_run(&mut self, locale:&Locale, font_idx:u32, features: &[hb::hb_feature_t], text:&str) -> Vec<(hb::hb_glyph_info_t,hb::hb_glyph_position_t)> {
         use hb::*;
-        let hb_font = self.hb_fonts[font_idx as usize];
+        let font = &self.fonts[font_idx as usize];
         unsafe{
             hb_buffer_reset(self.buffer);
             hb_buffer_add_utf8(self.buffer, text.as_ptr() as *const i8, text.len() as i32, 0, -1);
             hb_buffer_set_segment_properties(self.buffer, &locale.segment_properties);
-            hb_shape(hb_font, self.buffer, if features.len()==0 {core::ptr::null()} else {features.as_ptr()}, features.len() as u32);
+            hb_shape(font.hb_font, self.buffer, if features.len()==0 {core::ptr::null()} else {features.as_ptr()}, features.len() as u32);
         };
 
         let mut glyph_info_count = 0;
@@ -230,7 +272,7 @@ impl TextEngine {
     }
 
     fn rasterize_glyph(&mut self, ret: &mut Text, style: &Style, cursor: vec2<i32>, info: hb::hb_glyph_info_t, pos: hb::hb_glyph_position_t){
-        let ft_face = &mut self.ft_faces[style.font_idx as usize];
+        let font = &self.fonts[style.font_idx as usize];
 
         let id = info.codepoint; // actually glyph index, not codepoint
         let x = div_round((cursor.0 + pos.x_offset)*style.subpixel, 64);
@@ -252,9 +294,9 @@ impl TextEngine {
                              style.color));
             }
         }else{
-            ft_face.load_glyph(id, style.load_flags()).unwrap();
+            font.ft_face.load_glyph(id, style.load_flags()).unwrap();
             let subpixel_offset = Some(ft::Vector{x:frac64 as i64, y:0});
-            let glyph  = ft_face.glyph().get_glyph().unwrap().to_bitmap(ft::render_mode::RenderMode::Lcd, subpixel_offset).unwrap();
+            let glyph  = font.ft_face.glyph().get_glyph().unwrap().to_bitmap(ft::render_mode::RenderMode::Lcd, subpixel_offset).unwrap();
             let bitmap = glyph.bitmap();
             let width_sub  = bitmap.width();
             let width = width_sub/3;
@@ -295,44 +337,6 @@ impl TextEngine {
                         v: uv.1 as i32 });
             }
         }
-    }
-
-    pub fn render_text(&mut self,
-            cursor:      &mut vec2<i32>,
-            _left:       i32,
-            _right:      i32,
-            styled_text: &[(&Locale,&Style,&str)]) -> Text {
-        use hb::*;
-        let mut ret = Text{
-            quads: Vec::new(),
-            buffer_updates: Vec::new(),
-            pixels: Vec::new(),
-        };
-
-        let line_segmenter = icu::segmenter::LineSegmenter::new_dictionary();
-        let mut cat = String::new();
-        for (_,_,text) in styled_text {
-            cat.push_str(text);
-        }
-
-        for i in line_segmenter.segment_str(&cat) {
-            if i==0 || i==cat.len() { continue };
-            let break_char = cat.chars().nth(i-1).unwrap();
-            let is_mandatory = is_mandatory_linebreak(break_char);
-            println!("line-break {i:3}: mandatory: {is_mandatory}");
-        }
-
-        for (locale,style,text) in styled_text.into_iter() {
-            self.set_style_for_font(style);
-            let features = style.features();
-            let shaped_glyphs = self.shape_text_run(locale, style.font_idx, &features, text);
-            for (info,pos) in shaped_glyphs {
-                self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
-                cursor.0 += pos.x_advance;
-                cursor.1 += pos.y_advance;
-            }
-        }
-        return ret;
     }
 }
 
