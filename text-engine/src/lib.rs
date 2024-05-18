@@ -1,3 +1,4 @@
+#![allow(unused)]
 use freetype as ft;
 use harfbuzz_sys as hb;
 use std::collections::HashMap;
@@ -31,6 +32,24 @@ pub struct Style<'a>{
     pub subpixel: i32,
     pub features: &'a[&'a str],
 }
+impl Style<'_> {
+    fn load_flags(&self) -> ft::face::LoadFlag {
+        if self.autohint {
+            ft::face::LoadFlag::FORCE_AUTOHINT
+        } else {
+            ft::face::LoadFlag::NO_AUTOHINT
+        }
+    }
+    fn features(&self) -> Vec<hb::hb_feature_t> {
+        self.features.into_iter().map(|f|{
+            let mut ret = unsafe{core::mem::MaybeUninit::<hb::hb_feature_t>::zeroed().assume_init()};
+            if unsafe{hb::hb_feature_from_string(f.as_ptr() as *const i8, f.len() as i32, core::ptr::addr_of_mut!(ret))} != 0 {
+                panic!("failed to parse feature: {f:?}");
+            };
+            ret
+        }).collect()
+    }
+}
 
 
 #[derive(Copy,Clone)]
@@ -52,6 +71,7 @@ struct GlyphCacheKey{
     autohint  : bool,
 }
 
+// TODO: make multi-thread friendly
 struct GlyphCache{
     map: HashMap<GlyphCacheKey,GlyphCacheEntry>,
     tex_size:  u16,
@@ -85,14 +105,6 @@ pub struct Text{
     pub quads          : Vec<[Vertex;4]>,
     pub buffer_updates : Vec<BufferImageCopy>,
     pub pixels         : Vec<u8>,
-}
-
-pub struct TextEngine{
-    _freetype_lib: ft::Library,
-    glyph_cache: GlyphCache,
-    buffer:      *mut hb::hb_buffer_t,
-    ft_faces:    Vec<ft::Face>,
-    hb_fonts:    Vec<*mut hb::hb_font_t>,
 }
 
 #[derive(Clone,Copy,PartialEq)]
@@ -132,6 +144,30 @@ impl Locale{
     }
 }
 
+/// mandatory breaks according to LB4 and LB5 of [UAX #14 rev 51](https://www.unicode.org/reports/tr14/tr14-51.html)
+/// does not consider end-of-line as linebreak
+fn is_mandatory_linebreak(c: char) -> bool {
+    use icu::properties::LineBreak;
+    let line_break_map = icu::properties::maps::line_break();
+    match line_break_map.get(c) {
+        LineBreak::MandatoryBreak |
+        LineBreak::CarriageReturn |
+        LineBreak::LineFeed |
+        LineBreak::NextLine => true,
+        _ => false,
+    }
+}
+
+
+// right now single-threaded, but in future per-thread state
+// OPEN QUESTION: should we expose ICU?
+pub struct TextEngine{
+    _freetype_lib: ft::Library,
+    glyph_cache: GlyphCache, 
+    buffer:      *mut hb::hb_buffer_t,
+    ft_faces:    Vec<ft::Face>,
+    hb_fonts:    Vec<*mut hb::hb_font_t>,
+}
 impl TextEngine {
     pub fn new(glyph_texture_size:u16, fontfiles: &[&str]) -> Self {
         let freetype_lib = ft::Library::init().expect("failed to initialize freetype");
@@ -152,18 +188,7 @@ impl TextEngine {
         }
     }
 
-    // Text rendering can fundamentally not be cleanly separated into parts. Everything affects
-    // everything else. This means the easiest thing to do is have a monolithic function that does
-    // everything. It's better to have a monolithic function as API that can hide language
-    // complexities, than have a complex API.
-    //
-    // next features: subpixel positioning and line-breaking
-    pub fn render_line_of_text(&mut self,
-            ret:            &mut Text,
-            locale:         &Locale,
-            style:          &Style,
-            start_position: vec2<i32>,
-            text:           &str){
+    fn set_style_for_font(&mut self, style: &Style){
         use hb::*;
         assert!(style.subpixel>=1);
         assert!(style.subpixel<=64);
@@ -172,29 +197,23 @@ impl TextEngine {
         let ft_face = &mut self.ft_faces[style.font_idx as usize];
         ft_face.set_char_size(0, (style.size as isize)*64, 0, 0).unwrap();
 
-
         // TODO: assert that exactly 1 variable axis exists, and that it corresponds to font-weight
-        //let mut amaster : *mut ft::ffi::FT_MM_Var = core::ptr::null_mut();
         let var = (style.weight as i64) <<16;
         unsafe{ft::ffi::FT_Set_Var_Design_Coordinates(ft_face.raw_mut(), 1, &var)};
 
         unsafe{hb_ft_font_changed(hb_font)};
-        let load_flags = if style.autohint { ft::face::LoadFlag::FORCE_AUTOHINT } else { ft::face::LoadFlag::NO_AUTOHINT };
-        unsafe{hb_ft_font_set_load_flags(hb_font, load_flags.bits())};
+        unsafe{hb_ft_font_set_load_flags(hb_font, style.load_flags().bits())};
+    }
 
-        let features : Vec<_> = style.features.into_iter().map(|f|{
-            let mut ret = unsafe{core::mem::MaybeUninit::<hb_feature_t>::zeroed().assume_init()};
-            if unsafe{hb_feature_from_string(f.as_ptr() as *const i8, f.len() as i32, core::ptr::addr_of_mut!(ret))} != 0 {
-                panic!("failed to parse feature: f");
-            };
-            ret
-        }).collect();
-
+    // warning: set_style_for_font MUST be called before this
+    fn shape_text_run(&mut self, locale:&Locale, font_idx:u32, features: &[hb::hb_feature_t], text:&str) -> Vec<(hb::hb_glyph_info_t,hb::hb_glyph_position_t)> {
+        use hb::*;
+        let hb_font = self.hb_fonts[font_idx as usize];
         unsafe{
             hb_buffer_reset(self.buffer);
             hb_buffer_add_utf8(self.buffer, text.as_ptr() as *const i8, text.len() as i32, 0, -1);
             hb_buffer_set_segment_properties(self.buffer, &locale.segment_properties);
-            hb_shape(hb_font, self.buffer, if style.features.len()==0 {core::ptr::null()} else {features.as_ptr()}, features.len() as u32);
+            hb_shape(hb_font, self.buffer, if features.len()==0 {core::ptr::null()} else {features.as_ptr()}, features.len() as u32);
         };
 
         let mut glyph_info_count = 0;
@@ -207,75 +226,113 @@ impl TextEngine {
 
         assert_eq!(glyph_info_count, glyph_pos_count);
 
-        let mut cursor = start_position;
-        for (info,pos) in std::iter::zip(glyph_infos, glyph_positons) {
-            let id = info.codepoint; // actually glyph index, not codepoint
-            let x = div_round((cursor.0 + pos.x_offset)*style.subpixel, 64);
-            let y = div_round( cursor.1 + pos.y_offset , 64);
-            let x_frac = x%style.subpixel;
-            let x = x/style.subpixel;
+        std::iter::zip(glyph_infos, glyph_positons).map(|(i,p)|(*i,*p)).collect()
+    }
 
-            let frac64 = (x_frac*64/style.subpixel) as u32;
-            //println!("{x:4}+{x_frac:2}/{:2} = {frac64:2}/64", style.subpixel);
+    fn rasterize_glyph(&mut self, ret: &mut Text, style: &Style, cursor: vec2<i32>, info: hb::hb_glyph_info_t, pos: hb::hb_glyph_position_t){
+        let ft_face = &mut self.ft_faces[style.font_idx as usize];
 
-            if let Some(entry) = self.glyph_cache.get(&GlyphCacheKey{font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}) {
-                if !(entry.width<=0 || entry.height<=0) { // invisible character, ignore for rendering
-                    ret.quads.push(
-                        gen_quad(x as i16 + entry.left,
-                                 y as i16 - entry.top,
-                                 entry.width  as i16, 
-                                 entry.height as i16,
-                                 entry.u, entry.v,
-                                 style.color));
-                }
-            }else{
-                ft_face.load_glyph(id, load_flags).unwrap();
-                let subpixel_offset = Some(ft::Vector{x:frac64 as i64, y:0});
-                let glyph  = ft_face.glyph().get_glyph().unwrap().to_bitmap(ft::render_mode::RenderMode::Lcd, subpixel_offset).unwrap();
-                let bitmap = glyph.bitmap();
-                let width_sub  = bitmap.width();
-                let width = width_sub/3;
-                let height = bitmap.rows();
-                let pitch  = bitmap.pitch();
-                let left   = glyph.left();
-                let top    = glyph.top();
-                if !(width<=0 || height<=0) { 
-                    assert_eq!(ret.pixels.len()%4, 0);
-                    let buffer_offset = ret.pixels.len() as u64;
-                    let uv = self.glyph_cache.insert( GlyphCacheKey{ font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}, 
-                                                          width as u16, height as u16, left as i16, top as i16);
-                    // convert to tightly-packed rgba
-                    let bitmap_buffer = bitmap.buffer();
-                    let mut pixel_counter = 0;
-                    for h in 0..height {
-                        for w in 0..width_sub {
-                            ret.pixels.push(bitmap_buffer[(h*pitch + w) as usize]);
-                            if pixel_counter%3==2 { 
-                                ret.pixels.push(0xFF);
-                            }
-                            pixel_counter += 1;
-                        }
-                    }
-                    
-                    ret.quads.push(
-                        gen_quad((x+left) as i16,
-                                 (y-top)  as i16,
-                                 width as i16, height as i16,
-                                 uv.0, uv.1,
-                                 style.color));
-                    ret.buffer_updates.push(
-                        BufferImageCopy{
-                            buffer_offset,
-                            width:  width as u32,
-                            height: height as u32,
-                            u: uv.0 as i32,
-                            v: uv.1 as i32 });
-                }
+        let id = info.codepoint; // actually glyph index, not codepoint
+        let x = div_round((cursor.0 + pos.x_offset)*style.subpixel, 64);
+        let y = div_round( cursor.1 + pos.y_offset , 64);
+        let x_frac = x%style.subpixel;
+        let x = x/style.subpixel;
+
+        let frac64 = (x_frac*64/style.subpixel) as u32;
+        //println!("{x:4}+{x_frac:2}/{:2} = {frac64:2}/64", style.subpixel);
+
+        if let Some(entry) = self.glyph_cache.get(&GlyphCacheKey{font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}) {
+            if !(entry.width<=0 || entry.height<=0) { // invisible character, ignore for rendering
+                ret.quads.push(
+                    gen_quad(x as i16 + entry.left,
+                             y as i16 - entry.top,
+                             entry.width  as i16, 
+                             entry.height as i16,
+                             entry.u, entry.v,
+                             style.color));
             }
-
-            cursor.0 += pos.x_advance;
-            cursor.1 += pos.y_advance;
+        }else{
+            ft_face.load_glyph(id, style.load_flags()).unwrap();
+            let subpixel_offset = Some(ft::Vector{x:frac64 as i64, y:0});
+            let glyph  = ft_face.glyph().get_glyph().unwrap().to_bitmap(ft::render_mode::RenderMode::Lcd, subpixel_offset).unwrap();
+            let bitmap = glyph.bitmap();
+            let width_sub  = bitmap.width();
+            let width = width_sub/3;
+            let height = bitmap.rows();
+            let pitch  = bitmap.pitch();
+            let left   = glyph.left();
+            let top    = glyph.top();
+            if !(width<=0 || height<=0) { 
+                assert_eq!(ret.pixels.len()%4, 0);
+                let buffer_offset = ret.pixels.len() as u64;
+                let uv = self.glyph_cache.insert( GlyphCacheKey{ font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}, 
+                                                      width as u16, height as u16, left as i16, top as i16);
+                // convert to tightly-packed rgba
+                let bitmap_buffer = bitmap.buffer();
+                let mut pixel_counter = 0;
+                for h in 0..height {
+                    for w in 0..width_sub {
+                        ret.pixels.push(bitmap_buffer[(h*pitch + w) as usize]);
+                        if pixel_counter%3==2 { 
+                            ret.pixels.push(0xFF);
+                        }
+                        pixel_counter += 1;
+                    }
+                }
+                
+                ret.quads.push(
+                    gen_quad((x+left) as i16,
+                             (y-top)  as i16,
+                             width as i16, height as i16,
+                             uv.0, uv.1,
+                             style.color));
+                ret.buffer_updates.push(
+                    BufferImageCopy{
+                        buffer_offset,
+                        width:  width as u32,
+                        height: height as u32,
+                        u: uv.0 as i32,
+                        v: uv.1 as i32 });
+            }
         }
+    }
+
+    pub fn render_text(&mut self,
+            cursor:      &mut vec2<i32>,
+            _left:       i32,
+            _right:      i32,
+            styled_text: &[(&Locale,&Style,&str)]) -> Text {
+        use hb::*;
+        let mut ret = Text{
+            quads: Vec::new(),
+            buffer_updates: Vec::new(),
+            pixels: Vec::new(),
+        };
+
+        let line_segmenter = icu::segmenter::LineSegmenter::new_dictionary();
+        let mut cat = String::new();
+        for (_,_,text) in styled_text {
+            cat.push_str(text);
+        }
+
+        for i in line_segmenter.segment_str(&cat) {
+            if i==0 || i==cat.len() { continue };
+            let break_char = cat.chars().nth(i-1).unwrap();
+            let is_mandatory = is_mandatory_linebreak(break_char);
+            println!("line-break {i:3}: mandatory: {is_mandatory}");
+        }
+
+        for (locale,style,text) in styled_text.into_iter() {
+            self.set_style_for_font(style);
+            let features = style.features();
+            let shaped_glyphs = self.shape_text_run(locale, style.font_idx, &features, text);
+            for (info,pos) in shaped_glyphs {
+                self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
+                cursor.0 += pos.x_advance;
+                cursor.1 += pos.y_advance;
+            }
+        }
+        return ret;
     }
 }
 

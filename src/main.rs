@@ -193,23 +193,18 @@ impl ApplicationHandler for App {
                 let style_s3  = Style{ features, color:gb_yellow, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 300 };
                 let style_h2  = Style{ features, color:gb_light, subpixel,   autohint: false, font_idx: 3, size: 48, weight: 250 };
 
-                let mut cursor = vec2(50,50)*64;
-                text_engine.render_line_of_text(&mut text, &english, &style_h1, cursor, "Hello, World! 48pt");
-                cursor.1 += 30*64;
-                text_engine.render_line_of_text(&mut text, &english, &style_s1, cursor, "This is an example of an italic sentence. This is set at 21pts");
-                cursor.1 += 30*64;
-
-                text_engine.render_line_of_text(&mut text, &english, &style_s2h,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. A");
-                cursor.1 += 20*64;
-                text_engine.render_line_of_text(&mut text, &english, &style_s2, cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. B");
-                cursor.1 += 20*64;
-                text_engine.render_line_of_text(&mut text, &english, &style_s2s,cursor, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. C");
-                cursor.1 += 30*64;
-
-                text_engine.render_line_of_text(&mut text, &english, &style_s3, cursor, "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font.");
-                cursor.1 += 50*64;
-                text_engine.render_line_of_text(&mut text, &english, &style_h2, cursor, "And it has absolutely kick-ass italics.");
-                cursor.1 += 20*64;
+                let left  =   50*64;
+                let right = 1000*64;
+                let mut cursor = vec2(left,6400);
+                let text = text_engine.render_text(&mut cursor, left, right, &[
+                    (&english, &style_h1,  "Hello, World! 48pt\n"),
+                    (&english, &style_s1,  "This is an example of an italic sentence. This is set at 21pts\n"),
+                    (&english, &style_s2h, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. A\n"),
+                    (&english, &style_s2,  "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. B\n"),
+                    (&english, &style_s2s, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. C"),
+                    (&english, &style_s3,  "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font."),
+                    (&english, &style_h2,  "And it has absolutely kick-ass italics."),
+                ]);
                 //text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_engine.glyph_cache.current_x as i16, 50, 0, 0, gb_yellow)); // debug: visualize glyph_cache
 
                 let mut frame = renderer.wait_and_begin_frame();
