@@ -182,28 +182,30 @@ impl ApplicationHandler for App {
                 let color = gb_aqua;
                 let features = &[];
                 let subpixel = 8;
-                let style_h1  = Style{ features, color:gb_light, subpixel,   autohint: false, font_idx: 0, size: 48, weight: 300 };
-                let style_s1  = Style{ features, color, subpixel,   autohint: false, font_idx: 1, size: 21, weight: 400 };
+                let style_h1  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 0, size: 48, weight: 300 };
+                let style_s1  = Style{ features, color,           subpixel,   autohint: false, font_idx: 1, size: 21, weight: 400 };
 
-                let style_s2  = Style{ features, color:gb_red, subpixel,   autohint: false, font_idx: 0, size: 12, weight: 400 };
-                let style_s2s = Style{ features, color:gb_red, subpixel:1, autohint: false, font_idx: 0, size: 12, weight: 400 };
-                let style_s2h = Style{ features, color:gb_red, subpixel,   autohint: true,  font_idx: 0, size: 12, weight: 400 };
+                let style_s2  = Style{ features, color:gb_red,    subpixel,   autohint: false, font_idx: 0, size: 12, weight: 400 };
+                let style_s2s = Style{ features, color:gb_red,    subpixel:1, autohint: false, font_idx: 0, size: 12, weight: 400 };
+                let style_s2h = Style{ features, color:gb_red,    subpixel,   autohint: true,  font_idx: 0, size: 12, weight: 400 };
 
                 let style_s3  = Style{ features, color:gb_yellow, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 300 };
-                let style_h2  = Style{ features, color:gb_light, subpixel,   autohint: false, font_idx: 3, size: 48, weight: 250 };
+                let style_h2  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 3, size: 48, weight: 250 };
 
                 let left  =   50*64;
-                let right = 1000*64;
+                let right =  700*64;
                 let mut cursor = vec2(left,6400);
-                let text = text_engine.render_text(&mut cursor, left, right, &[
-                    (&english, &style_h1,  "Hello, World! 48pt\n"),
-                    (&english, &style_s1,  "This is an example of an italic sentence. This is set at 21pts\n"),
-                    (&english, &style_s2h, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. A\n"),
-                    (&english, &style_s2,  "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. B\n"),
-                    (&english, &style_s2s, "Text rendering fidelity is bad at small sizes without sub-pixel positioning. This is 12pts. C"),
-                    (&english, &style_s3,  "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font."),
-                    (&english, &style_h2,  "And it has absolutely kick-ass italics."),
-                ]);
+
+                let mut paragraph = text_engine::StyledParagraph::default();
+                paragraph.add(&english, &style_h1,  "Hållo, Würld! 48pt. ");
+                paragraph.add(&english, &style_s1,  "This is an example. 21pts ");
+                paragraph.add(&english, &style_s2h, "Text rendering fidelity. 12pts. ");
+                paragraph.add(&english, &style_s2,  "Text rendering fidelity. 12pts. ");
+                paragraph.add(&english, &style_s2s, "Text rendering fidelity. 12pts. ");
+                paragraph.add(&english, &style_s3,  "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font. ");
+                paragraph.add(&english, &style_h2,  "And it has absolutely kick-ass italics.");
+
+                let text = text_engine.render_text(&mut cursor, left, right, &paragraph);
                 //text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_engine.glyph_cache.current_x as i16, 50, 0, 0, gb_yellow)); // debug: visualize glyph_cache
 
                 let mut frame = renderer.wait_and_begin_frame();

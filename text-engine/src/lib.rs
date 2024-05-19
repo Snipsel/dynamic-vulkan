@@ -1,7 +1,7 @@
 #![allow(unused)]
 use freetype as ft;
 use harfbuzz_sys as hb;
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Write};
 use common::{Color,Vertex,vec2,div_round,gen_quad};
 
 // freetype integration of harfbuzz_sys 0.6.1 is missing these bindings
@@ -185,6 +185,44 @@ impl Font{
     }
 }
 
+#[derive(Default)]
+pub struct StyledParagraph<'style>{
+    text : String,
+    runs : Vec<(&'style Locale,&'style Style<'style>,u32,u32)>,
+}
+
+impl<'style> StyledParagraph<'style>{
+    const NFD : icu::normalizer::DecomposingNormalizer = icu::normalizer::DecomposingNormalizer::new_nfd();
+    pub fn add(&mut self, locale:&'style Locale, style: &'style Style, input:&str){
+        let begin = self.text.len() as u32;
+        let input = if begin==0 {input.trim_start()} else {input};
+        Self::NFD.normalize_to(input, &mut self.text);
+        let end = self.text.len() as u32;
+        self.runs.push((&locale,style,begin,end));
+
+        let &(_,_,b,e) = self.runs.last().unwrap();
+    }
+    fn get(&self, begin:u32, end:u32) -> &str { &self.text[begin as usize..end as usize] }
+
+    fn _debug_print(&self, begin:u32, end:u32){
+        let text = self.get(begin,end);
+        for (i,b) in text.bytes().enumerate() {
+            if i&1==0 { print!("\x1B[95m"); }else{ print!("\x1B[91m"); }
+            print!("{b:02x}");
+        } println!("\x1b[m");
+        for (i,c) in text.chars().enumerate() {
+            let u = c as u32;
+            if u>0x20 && u<0x7F {
+                print!("\x1B[97;1m{c} \x1B[m")
+            } else {
+                if i&1==0 { print!("\x1B[95m"); }else{ print!("\x1B[91m"); }
+                print!("{u:0len$x}",len=2*c.len_utf8());
+            }
+        } println!("\x1b[m");
+    }
+}
+
+
 // right now single-threaded, but in future per-thread state
 // OPEN QUESTION: should we expose ICU? optional feature?
 pub struct TextEngine{
@@ -210,9 +248,9 @@ impl TextEngine {
 
     pub fn render_text(  &mut self,
             cursor:      &mut vec2<i32>,
-            _left:       i32,
-            _right:      i32,
-            styled_text: &[(&Locale,&Style,&str)]) -> Text {
+            left:        i32,
+            right:       i32,
+            styled_text: &StyledParagraph) -> Text {
         use hb::*;
         let mut ret = Text{
             quads: Vec::new(),
@@ -220,28 +258,20 @@ impl TextEngine {
             pixels: Vec::new(),
         };
 
-        let line_segmenter = icu::segmenter::LineSegmenter::new_dictionary();
-        let mut cat = String::new();
-        for (_,_,text) in styled_text {
-            cat.push_str(text);
-        }
-
-        for i in line_segmenter.segment_str(&cat) {
-            if i==0 || i==cat.len() { continue };
-            let break_char = cat.chars().nth(i-1).unwrap();
-            let is_mandatory = is_mandatory_linebreak(break_char);
-            println!("line-break {i:3}: mandatory: {is_mandatory}");
-        }
-
-        for (locale,style,text) in styled_text.into_iter() {
+        for &(locale,style,begin,end) in styled_text.runs.iter() {
+            let text = styled_text.get(begin,end);
             let font = &mut self.fonts[style.font_idx as usize];
             font.apply_style(style);
             let features = style.features();
             let shaped_glyphs = self.shape_text_run(locale, style.font_idx, &features, text);
             for (info,pos) in shaped_glyphs {
                 self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
+                // TODO: assuming left-to-right here (LTR)
                 cursor.0 += pos.x_advance;
-                cursor.1 += pos.y_advance;
+                if(cursor.0 >=right){
+                    cursor.0 = left;
+                    cursor.1 += 40*64;
+                }
             }
         }
         return ret;
@@ -260,11 +290,11 @@ impl TextEngine {
 
         let mut glyph_info_count = 0;
         let glyph_info_ptr = unsafe{hb_buffer_get_glyph_infos(self.buffer, &mut glyph_info_count)};
-        let glyph_infos = unsafe{core::slice::from_raw_parts_mut(glyph_info_ptr, glyph_info_count as usize)};
+        let glyph_infos = unsafe{core::slice::from_raw_parts(glyph_info_ptr, glyph_info_count as usize)};
 
         let mut glyph_pos_count = 0;
         let glyph_pos_ptr = unsafe{hb_buffer_get_glyph_positions(self.buffer, &mut glyph_pos_count)};
-        let glyph_positons = unsafe{core::slice::from_raw_parts_mut(glyph_pos_ptr, glyph_pos_count as usize)};
+        let glyph_positons = unsafe{core::slice::from_raw_parts(glyph_pos_ptr, glyph_pos_count as usize)};
 
         assert_eq!(glyph_info_count, glyph_pos_count);
 
