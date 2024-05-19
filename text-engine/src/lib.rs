@@ -1,4 +1,4 @@
-#![feature(array_windows, iter_map_windows,slice_split_once)]
+#![feature(array_windows, iter_map_windows,slice_split_once,const_mut_refs,const_trait_impl)]
 #![allow(unused)]
 use freetype as ft;
 use harfbuzz_sys as hb;
@@ -201,11 +201,19 @@ impl<'style> StyledParagraph<'style>{
         let end = self.text.len() as u32;
         self.runs.push((&locale,style,begin,end));
     }
+
+    // even members are linebreak starts
+    // odd  members are whitespace starts
     fn linebreak_candidates(&self) -> Vec<u32> {
         let view = self.text.trim_end();
         let line_breaker = icu::segmenter::LineSegmenter::new_dictionary();
-        line_breaker.segment_str(view).map(|x|(x as u32)).collect()
+        line_breaker.segment_str(view)
+                    .map_windows(|&[l,r]|{
+            let m = l+view[l..r].trim_end().len();
+            [l as u32, m as u32]
+        }).flatten().collect()
     }
+
     fn str(&self, begin:u32, end:u32) -> &str { &self.text[begin as usize..end as usize] }
     fn trim_end_idx(&self, begin:u32, end:u32) -> u32 { begin + self.str(begin,end).trim_end().len() as u32 }
 
@@ -249,6 +257,26 @@ impl<'style> StyledParagraph<'style>{
     }
 }
 
+/*
+struct Window(u32,u32);
+
+struct Intersection<IterA,IterB>
+    where IterA:Iterator<Item=Window>,
+          IterB:Iterator<Item=Window> {
+    a_iter : IterA,
+    b_iter : IterB,
+}
+
+impl<IterA,IterB> const Iterator for Intersection<IterA,IterB> 
+    where IterA:Iterator<Item=Window>,
+          IterB:Iterator<Item=Window> {
+    type Item = (Window,Window);
+    fn next(&mut self) -> Option<Self::Item> {
+
+    }
+}
+*/
+
 // right now single-threaded, but in future per-thread state
 // OPEN QUESTION: should we expose ICU? optional feature?
 pub struct TextEngine{
@@ -290,18 +318,40 @@ impl TextEngine {
             let font = &mut self.fonts[style.font_idx as usize];
             font.apply_style(style);
             let features = style.features();
+
             let shaped_glyphs = self.shape_text_run(locale, style.font_idx, &features, text);
             {
-                let run_linebreaks : Vec<u32> = linebreaks.iter().map(|&x|x).skip_while(|x|*x<begin).take_while(|x|*x<=end).collect();
-                let clusters : Vec<u32> = shaped_glyphs.iter()
+                let run_linebreaks : Vec<(u32,u32)> = linebreaks.iter().enumerate()
+                    .map(|(i,&x)|(i as u32,x))
+                    .skip_while(|&(i,x)|x<begin)
+                    .take_while(|&(i,x)|x<=end)
+                    .collect();
+
+                let mut cluster_iter = shaped_glyphs.iter()
                     .map(|&(info,pos)|info.cluster)
                     .chain(std::iter::once(end-begin))
-                    .collect();
+                    .map_windows(|&[l,r]| (l,r))
+                    .zip(shaped_glyphs.iter());
+
                 styled_text._debug_print(begin, end);
-                styled_text._debug_print_clusters(begin, end, &clusters);
-                styled_text._debug_print_clusters(begin, end, run_linebreaks.as_slice());
+                //styled_text._debug_print_clusters(begin, end, &cluster_indices);
+                //styled_text._debug_print_clusters(begin, end, run_linebreaks.as_slice());
                 println!();
+
+                for &[(i,break_l),(_,break_r)] in run_linebreaks.array_windows() {
+                    let break_l = break_l-begin;
+                    let break_r = break_r-begin;
+                    let mut length = 0;
+                    for ((l,r),(info,pos)) in &mut cluster_iter {
+                        length += pos.x_advance as i32;
+                        if r>=break_r {
+                            break;
+                        }
+                    }
+                    println!("{:5}: {length}", if i&1==0 {"word"} else {"space"} );
+                }
             }
+
             for (info,pos) in shaped_glyphs {
                 self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
                 // TODO: assuming left-to-right here (LTR)
