@@ -1,3 +1,4 @@
+#![feature(array_windows, iter_map_windows,slice_split_once)]
 #![allow(unused)]
 use freetype as ft;
 use harfbuzz_sys as hb;
@@ -191,25 +192,40 @@ pub struct StyledParagraph<'style>{
     runs : Vec<(&'style Locale,&'style Style<'style>,u32,u32)>,
 }
 
+// invariant: no leading whitespaces allowed
 impl<'style> StyledParagraph<'style>{
-    const NFD : icu::normalizer::DecomposingNormalizer = icu::normalizer::DecomposingNormalizer::new_nfd();
     pub fn add(&mut self, locale:&'style Locale, style: &'style Style, input:&str){
         let begin = self.text.len() as u32;
-        let input = if begin==0 {input.trim_start()} else {input};
+        let input = if begin==0 { input.trim_start() } else { input };
         Self::NFD.normalize_to(input, &mut self.text);
         let end = self.text.len() as u32;
         self.runs.push((&locale,style,begin,end));
-
-        let &(_,_,b,e) = self.runs.last().unwrap();
     }
-    fn get(&self, begin:u32, end:u32) -> &str { &self.text[begin as usize..end as usize] }
+    fn linebreak_candidates(&self) -> Vec<u32> {
+        let view = self.text.trim_end();
+        let line_breaker = icu::segmenter::LineSegmenter::new_dictionary();
+        line_breaker.segment_str(view).map(|x|(x as u32)).collect()
+    }
+    fn str(&self, begin:u32, end:u32) -> &str { &self.text[begin as usize..end as usize] }
+    fn trim_end_idx(&self, begin:u32, end:u32) -> u32 { begin + self.str(begin,end).trim_end().len() as u32 }
 
+    const NFD : icu::normalizer::DecomposingNormalizer = icu::normalizer::DecomposingNormalizer::new_nfd();
     fn _debug_print(&self, begin:u32, end:u32){
-        let text = self.get(begin,end);
+        let text = self.str(begin,end);
+
+        // byte index
+        for i in 0..text.len() {
+            if i&1==0 { print!("\x1B[95m"); }else{ print!("\x1B[91m"); }
+            print!("{:2}", i%100);
+        } println!("\x1b[m");
+
+        // bytes
         for (i,b) in text.bytes().enumerate() {
             if i&1==0 { print!("\x1B[95m"); }else{ print!("\x1B[91m"); }
             print!("{b:02x}");
         } println!("\x1b[m");
+        
+        // code points
         for (i,c) in text.chars().enumerate() {
             let u = c as u32;
             if u>0x20 && u<0x7F {
@@ -220,8 +236,18 @@ impl<'style> StyledParagraph<'style>{
             }
         } println!("\x1b[m");
     }
+    fn _debug_print_clusters(&self, begin:u32, end:u32, clusters: &[u32]){
+        for (color,[l,r]) in clusters.iter().map_windows(|&[l,r]|[l,r]).enumerate() {
+            let len = r-l;
+            if color&1==0 { print!("\x1B[95m"); }else{ print!("\x1B[91m"); }
+            for i in 0..len {
+                let first = if i==0     {"└"} else {"─"};
+                let last  = if i==len-1 {"┘"} else {"─"};
+                print!("{}{}", first, last);
+            }
+        } println!("\x1b[m");
+    }
 }
-
 
 // right now single-threaded, but in future per-thread state
 // OPEN QUESTION: should we expose ICU? optional feature?
@@ -258,12 +284,24 @@ impl TextEngine {
             pixels: Vec::new(),
         };
 
+        let linebreaks = styled_text.linebreak_candidates();
         for &(locale,style,begin,end) in styled_text.runs.iter() {
-            let text = styled_text.get(begin,end);
+            let text = styled_text.str(begin,end);
             let font = &mut self.fonts[style.font_idx as usize];
             font.apply_style(style);
             let features = style.features();
             let shaped_glyphs = self.shape_text_run(locale, style.font_idx, &features, text);
+            {
+                let run_linebreaks : Vec<u32> = linebreaks.iter().map(|&x|x).skip_while(|x|*x<begin).take_while(|x|*x<=end).collect();
+                let clusters : Vec<u32> = shaped_glyphs.iter()
+                    .map(|&(info,pos)|info.cluster)
+                    .chain(std::iter::once(end-begin))
+                    .collect();
+                styled_text._debug_print(begin, end);
+                styled_text._debug_print_clusters(begin, end, &clusters);
+                styled_text._debug_print_clusters(begin, end, run_linebreaks.as_slice());
+                println!();
+            }
             for (info,pos) in shaped_glyphs {
                 self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
                 // TODO: assuming left-to-right here (LTR)
