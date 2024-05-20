@@ -194,6 +194,7 @@ pub struct StyledParagraph<'style>{
 
 // invariant: no leading whitespaces allowed
 impl<'style> StyledParagraph<'style>{
+
     pub fn add(&mut self, locale:&'style Locale, style: &'style Style, input:&str){
         let begin = self.text.len() as u32;
         let input = if begin==0 { input.trim_start() } else { input };
@@ -244,7 +245,7 @@ impl<'style> StyledParagraph<'style>{
             }
         } println!("\x1b[m");
     }
-    fn _debug_print_clusters(&self, begin:u32, end:u32, clusters: &[u32]){
+    fn _debug_print_clusters(&self, clusters: &[u32]){
         for (color,[l,r]) in clusters.iter().map_windows(|&[l,r]|[l,r]).enumerate() {
             let len = r-l;
             if color&1==0 { print!("\x1B[95m"); }else{ print!("\x1B[91m"); }
@@ -258,21 +259,63 @@ impl<'style> StyledParagraph<'style>{
 }
 
 /*
-struct Window(u32,u32);
-
-struct Intersection<IterA,IterB>
-    where IterA:Iterator<Item=Window>,
-          IterB:Iterator<Item=Window> {
-    a_iter : IterA,
-    b_iter : IterB,
+struct Segmentation<T> {
+    data:  Vec<T>,
+    index: Vec<u32>
+}
+impl<T> Segmentation<T> {
+    fn new(len:u32) -> Self {
+        Self{
+            data:  Vec::new(),
+            index: vec![len],
+        }
+    }
 }
 
-impl<IterA,IterB> const Iterator for Intersection<IterA,IterB> 
-    where IterA:Iterator<Item=Window>,
-          IterB:Iterator<Item=Window> {
-    type Item = (Window,Window);
+struct Segmentor<'a,T>{
+    seg: &'a Segmentation<T>,
+    i:   u32,
+}
+impl<'a,T> Segmentor<'a,T>{
+    fn has_ended(&self) -> bool {
+        self.i < (self.seg.index.len() as u32-1)
+    }
+    unsafe fn peek_unchecked(&self) -> (u32,u32,&'a T) {
+        (
+          *self.seg.index.get_unchecked(self.i as usize),
+          *self.seg.index.get_unchecked(self.i as usize+1),
+           self.seg.data.get_unchecked( self.i as usize)
+        )
+    }
+    fn advance(&mut self) { self.i+=1 }
+}
+impl<'a,T> Iterator for Segmentor<'a,T> {
+    type Item = (u32,u32,&'a T);
     fn next(&mut self) -> Option<Self::Item> {
+        if self.has_ended() {
+            let ret = unsafe{self.peek_unchecked()};
+            self.advance();
+            Some(ret)
+        }else{
+            None
+        }
+    }
+}
 
+struct Subset<'la,'lb,A,B>{
+    a: Segmentor<'la,A>,
+    b: Segmentor<'lb,B>,
+}
+impl<'la,'lb,A,B> Iterator for Subset<'la,'lb,A,B> {
+    type Item = (u32,u32,&'la A,&'lb B);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.a.has_ended() { None }
+        else if self.b.has_ended() { None }
+        else{
+            let (al,ar,at) = unsafe{self.a.peek_unchecked()};
+            let (bl,br,bt) = unsafe{self.b.peek_unchecked()};
+            todo!()
+        }
     }
 }
 */
@@ -312,7 +355,8 @@ impl TextEngine {
             pixels: Vec::new(),
         };
 
-        let linebreaks = styled_text.linebreak_candidates();
+        let (linebreak_indices,linebreak_lengths) = self.line_break_lengths(styled_text);
+
         for &(locale,style,begin,end) in styled_text.runs.iter() {
             let text = styled_text.str(begin,end);
             let font = &mut self.fonts[style.font_idx as usize];
@@ -320,37 +364,6 @@ impl TextEngine {
             let features = style.features();
 
             let shaped_glyphs = self.shape_text_run(locale, style.font_idx, &features, text);
-            {
-                let run_linebreaks : Vec<(u32,u32)> = linebreaks.iter().enumerate()
-                    .map(|(i,&x)|(i as u32,x))
-                    .skip_while(|&(i,x)|x<begin)
-                    .take_while(|&(i,x)|x<=end)
-                    .collect();
-
-                let mut cluster_iter = shaped_glyphs.iter()
-                    .map(|&(info,pos)|info.cluster)
-                    .chain(std::iter::once(end-begin))
-                    .map_windows(|&[l,r]| (l,r))
-                    .zip(shaped_glyphs.iter());
-
-                styled_text._debug_print(begin, end);
-                //styled_text._debug_print_clusters(begin, end, &cluster_indices);
-                //styled_text._debug_print_clusters(begin, end, run_linebreaks.as_slice());
-                println!();
-
-                for &[(i,break_l),(_,break_r)] in run_linebreaks.array_windows() {
-                    let break_l = break_l-begin;
-                    let break_r = break_r-begin;
-                    let mut length = 0;
-                    for ((l,r),(info,pos)) in &mut cluster_iter {
-                        length += pos.x_advance as i32;
-                        if r>=break_r {
-                            break;
-                        }
-                    }
-                    println!("{:5}: {length}", if i&1==0 {"word"} else {"space"} );
-                }
-            }
 
             for (info,pos) in shaped_glyphs {
                 self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
@@ -363,6 +376,58 @@ impl TextEngine {
             }
         }
         return ret;
+    }
+
+    // Returns array of line-break indices (inclusive), and an array of segment-lengths.
+    // the array of segment lengths is one shorter than the line break lengths.
+    fn line_break_lengths(&mut self, styled_text: &StyledParagraph) -> (Vec<u32>,Vec<i32>) {
+        let shaped_glyphs = self.shape_styled_paragraph(&styled_text);
+        let shaped_glyphs_index : Vec<u32> = shaped_glyphs.iter()
+            .map(|&(info,pos)|info.cluster)
+            .chain(std::iter::once(styled_text.text.len() as u32))
+            .collect();
+        let mut shaped_glyphs_iter = shaped_glyphs_index.iter()
+            .map_windows(|&[l,r]| (*l,*r))
+            .zip(shaped_glyphs.iter());
+        let linebreaks = styled_text.linebreak_candidates();
+
+        styled_text._debug_print(0, styled_text.text.len() as u32);
+        styled_text._debug_print_clusters(shaped_glyphs_index.as_slice());
+        styled_text._debug_print_clusters(linebreaks.as_slice());
+
+        let mut lengths = Vec::new();;
+        for (i,&[l,r]) in linebreaks.array_windows().enumerate() {
+            let mut length = 0;
+            //print!("{l:3}~{r:3} ");
+            for ((begin,end),(info,pos)) in &mut shaped_glyphs_iter {
+                length += pos.x_advance;
+                //print!("| {begin:3}+{} {:4} ", end-begin, pos.x_advance);
+                if end>=r { break }
+            }
+            lengths.push(length);
+            //println!("--> {:6}: {length}", if i&1==0 {"word"} else {"space"} );
+        }
+        assert_eq!(lengths.len()+1, linebreaks.len());
+        (linebreaks,lengths)
+    }
+
+    fn shape_styled_paragraph(&mut self, styled_text :&StyledParagraph) -> Vec<(hb::hb_glyph_info_t,hb::hb_glyph_position_t)> {
+        let mut shaped_glyphs :Vec<(hb::hb_glyph_info_t,hb::hb_glyph_position_t)> = Vec::new();
+        let mut cluster_offset = 0;
+        for &(locale,style,begin,end) in styled_text.runs.iter() {
+            let text = styled_text.str(begin,end);
+            let font = &mut self.fonts[style.font_idx as usize];
+            font.apply_style(style);
+            let features = style.features();
+            let mut local_shaped_glyphs = self.shape_text_run(locale, style.font_idx, &features, text);
+            for (info,pos) in local_shaped_glyphs.iter_mut() {
+                info.cluster += cluster_offset;
+            }
+            shaped_glyphs.extend_from_slice(local_shaped_glyphs.as_slice());
+            cluster_offset += end-begin;
+        }
+        assert_eq!(cluster_offset, styled_text.text.len() as u32);
+        shaped_glyphs
     }
 
     // warning: must call font::apply_style before this

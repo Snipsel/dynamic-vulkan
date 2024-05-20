@@ -197,13 +197,13 @@ impl ApplicationHandler for App {
                 let mut cursor = vec2(left,6400);
 
                 let mut paragraph = text_engine::StyledParagraph::default();
-                paragraph.add(&english, &style_h1,  "Hållo, Würld! 48pt. ");
-                paragraph.add(&english, &style_s1,  "This is an example. 21pts ");
-                paragraph.add(&english, &style_s2h, "Text rendering fidelity. 12pts. ");
-                paragraph.add(&english, &style_s2,  "Text rendering fidelity. 12pts. ");
-                paragraph.add(&english, &style_s2s, "Text rendering fidelity. 12pts. ");
-                paragraph.add(&english, &style_s3,  "Here's a serif font at 21px. I love Crimson Pro, it's a good-looking font. ");
-                paragraph.add(&english, &style_h2,  "And it has absolutely kick-ass italics.");
+                paragraph.add(&english, &style_h1,  "Hållo, World ");
+                paragraph.add(&english, &style_s1,  "Thüs ");
+                paragraph.add(&english, &style_s2h, "is rendering ");
+                paragraph.add(&english, &style_s2,  "fidelity. ");
+                paragraph.add(&english, &style_s2s, "fidelity. ");
+                paragraph.add(&english, &style_s3,  "Here's a serif ");
+                paragraph.add(&english, &style_h2,  "And.");
 
                 let text = text_engine.render_text(&mut cursor, left, right, &paragraph);
                 //text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_engine.glyph_cache.current_x as i16, 50, 0, 0, gb_yellow)); // debug: visualize glyph_cache
