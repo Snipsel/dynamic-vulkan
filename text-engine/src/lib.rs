@@ -1,7 +1,8 @@
-#![feature(array_windows, iter_map_windows,slice_split_once,const_mut_refs,const_trait_impl)]
+#![feature(array_windows, iter_array_chunks, iter_map_windows,slice_split_once,const_mut_refs,const_trait_impl)]
 #![allow(unused)]
 use freetype as ft;
 use harfbuzz_sys as hb;
+use hb::hb_glyph_info_t;
 use std::{collections::HashMap, fmt::Write};
 use common::{Color,Vertex,vec2,div_round,gen_quad};
 
@@ -270,18 +271,45 @@ impl<T> Segmentation<T> {
         self.index.array_windows()
             .map(|&[l,r]| (l,r))
     }
-    fn map<U>(&self, mut f:impl FnMut((u32,u32),&T)->U) -> Segmentation<U> {
-        let mut data : Vec<U> = Vec::with_capacity(self.data.len());
-        for ((l,r),t) in self.iter() {
-            let u : U = f((l,r),t);
-            data.push(u);
-        }
-        Segmentation{
-            data,
-            index: self.index.clone(),
-        }
+
+    fn chunk2(&self) -> impl Iterator<Item=([u32;3],[&T;2])> {
+        self.iter().array_chunks::<2>()
+            .map(|[((l,m),a),((_,r),b)]|([l,m,r],[a,b]))
     }
+
+    // broken?
+    // fn map<U>(&self, mut f:impl FnMut((u32,u32),&T)->U) -> Segmentation<U> {
+    //     let mut data : Vec<U> = Vec::with_capacity(self.data.len());
+    //     for ((l,r),t) in self.iter() {
+    //         let u : U = f((l,r),t);
+    //         data.push(u);
+    //     }
+    //     Segmentation{
+    //         data,
+    //         index: self.index.clone(),
+    //     }
+    // }
 }
+
+type HbGlyph = (hb::hb_glyph_info_t,hb::hb_glyph_position_t);
+
+fn gen_style_segmentation<'s>(styled_text :  &'s StyledParagraph,
+                              shaped_glyphs: &Segmentation<HbGlyph> )
+                              -> Segmentation::<&'s Style<'s>> {
+    let mut styles = Segmentation::<&Style>{
+        data:  Vec::default(),
+        index: Vec::default()
+    };
+    let mut last = 0u32;
+    for &(locale,style,begin,end) in styled_text.runs.iter() {
+        styles.data.push(style);
+        styles.index.push(begin);
+        last = end;
+    }
+    styles.index.push(last);
+    return styles;
+}
+
 
 // right now single-threaded, but in future per-thread state
 // OPEN QUESTION: should we expose ICU? optional feature?
@@ -308,62 +336,84 @@ impl TextEngine {
 
     pub fn render_text(  &mut self,
             cursor:      &mut vec2<i32>,
-            left:        i32,
-            right:       i32,
+            line_width:  i32,
             styled_text: &StyledParagraph) -> Text {
         use hb::*;
 
-        let linebreaks = self.line_break_lengths(styled_text);
+        let left_margin = cursor.0;
 
-        let mut ret = Text{
-            quads: Vec::new(),
-            buffer_updates: Vec::new(),
-            pixels: Vec::new(),
-        };
-        for &(locale,style,begin,end) in styled_text.runs.iter() {
-            let text = styled_text.str(begin,end);
-            let font = &mut self.fonts[style.font_idx as usize];
-            font.apply_style(style);
-            let features = style.features();
+        let shaped_glyphs = self.shape_styled_paragraph(&styled_text);
+        let styles = gen_style_segmentation(&styled_text, &shaped_glyphs);
 
-            let shaped_glyphs = self.shape_text_run(locale, style.font_idx, &features, text);
+        let mut break_opportunities = self.line_break_lengths(styled_text, &shaped_glyphs);
+        // if odd number of elements, add empty segment at the end
+        // should probably be handled by chunk2
+        if break_opportunities.data.len()%2 != 0 {
+            break_opportunities.index.push(*break_opportunities.index.last().unwrap());
+            break_opportunities.data.push(0);
+        }
+        let break_opportunities = break_opportunities;
 
-            for (info,pos) in shaped_glyphs {
-                self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
-                // TODO: assuming left-to-right here (LTR)
-                cursor.0 += pos.x_advance;
-                if(cursor.0 >=right){
-                    cursor.0 = left;
-                    cursor.1 += 40*64;
-                }
+        println!("limit: {line_width}");
+        let mut break_points = Vec::new();
+        let mut length_so_far = 0;
+        for ([l,m,r],[word_width,space_width]) in break_opportunities.chunk2(){
+            if length_so_far + word_width > line_width {
+                println!("BREAK before {length_so_far}");
+                println!("{l:3}~{m:3} {length_so_far:5}  {:5} [{}] ", length_so_far+word_width, styled_text.str(l,m));
+                break_points.push(length_so_far);
+                length_so_far = 0;
+            }else{
+                println!("{l:3}~{m:3} {length_so_far:5}->{:5} [{}] ", length_so_far+word_width, styled_text.str(l,m));
+                length_so_far += word_width + space_width;
             }
         }
-        return ret;
+
+        // render
+        {
+            let mut ret = Text::default();
+            let mut shaped_glyph_iter = shaped_glyphs.iter();
+            for ((style_l,style_r),&style) in styles.iter() {
+
+                let font = &mut self.fonts[style.font_idx as usize];
+                font.apply_style(style);
+
+                for ((l,r),&(info,pos)) in &mut shaped_glyph_iter {
+
+                    self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
+                    cursor.0 += pos.x_advance;
+
+                    if style_r==r { break }
+                }
+            }
+            return ret;
+        }
     }
 
     // Returns array of line-break indices (inclusive), and an array of segment-lengths.
     // the array of segment lengths is one shorter than the line break lengths.
-    fn line_break_lengths(&mut self, styled_text: &StyledParagraph) -> Segmentation<i32> {
-        let shaped_glyphs = self.shape_styled_paragraph(&styled_text);
+    fn line_break_lengths(&mut self, styled_text: &StyledParagraph, shaped_glyphs: &Segmentation<HbGlyph>) -> Segmentation<i32> {
         let mut shaped_glyphs_iter = shaped_glyphs.iter();
         let linebreaks = styled_text.linebreak_candidates();
 
-        styled_text._debug_print(0, styled_text.text.len() as u32);
-        styled_text._debug_print_clusters(shaped_glyphs.index.as_slice());
-        styled_text._debug_print_clusters(linebreaks.index.as_slice());
+        // styled_text._debug_print(0, styled_text.text.len() as u32);
+        // styled_text._debug_print_clusters(shaped_glyphs.index.as_slice());
+        // styled_text._debug_print_clusters(linebreaks.index.as_slice());
 
-        linebreaks.map(|(l,r),_|{
+        let mut ret = Vec::new();
+        for (l,r) in linebreaks.iter_index() {
             let mut length = 0;
             for ((begin,end),(info,pos)) in &mut shaped_glyphs_iter {
                 length += pos.x_advance;
                 if end>=r { break }
             }
-            length
-        })
+            ret.push(length);
+        }
+        Segmentation{index:linebreaks.index, data:ret}
     }
 
-    fn shape_styled_paragraph(&mut self, styled_text :&StyledParagraph) -> Segmentation<(hb::hb_glyph_info_t,hb::hb_glyph_position_t)> {
-        let mut shaped_glyphs :Vec<(hb::hb_glyph_info_t,hb::hb_glyph_position_t)> = Vec::new();
+    fn shape_styled_paragraph(&mut self, styled_text :&StyledParagraph) -> Segmentation<HbGlyph> {
+        let mut shaped_glyphs :Vec<HbGlyph> = Vec::new();
         let mut cluster_offset = 0;
         for &(locale,style,begin,end) in styled_text.runs.iter() {
             let text = styled_text.str(begin,end);
@@ -386,7 +436,7 @@ impl TextEngine {
     }
 
     // warning: must call font::apply_style before this
-    fn shape_text_run(&mut self, locale:&Locale, font_idx:u32, features: &[hb::hb_feature_t], text:&str) -> Vec<(hb::hb_glyph_info_t,hb::hb_glyph_position_t)> {
+    fn shape_text_run(&mut self, locale:&Locale, font_idx:u32, features: &[hb::hb_feature_t], text:&str) -> Vec<HbGlyph> {
         use hb::*;
         let font = &self.fonts[font_idx as usize];
         unsafe{

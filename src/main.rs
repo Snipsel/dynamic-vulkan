@@ -186,26 +186,21 @@ impl ApplicationHandler for App {
                 let style_s1  = Style{ features, color,           subpixel,   autohint: false, font_idx: 1, size: 21, weight: 400 };
 
                 let style_s2  = Style{ features, color:gb_red,    subpixel,   autohint: false, font_idx: 0, size: 12, weight: 400 };
-                let style_s2s = Style{ features, color:gb_red,    subpixel:1, autohint: false, font_idx: 0, size: 12, weight: 400 };
-                let style_s2h = Style{ features, color:gb_red,    subpixel,   autohint: true,  font_idx: 0, size: 12, weight: 400 };
 
                 let style_s3  = Style{ features, color:gb_yellow, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 300 };
                 let style_h2  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 3, size: 48, weight: 250 };
 
-                let left  =   50*64;
-                let right =  700*64;
-                let mut cursor = vec2(left,6400);
+                let line_width = 600*64;
+                let mut cursor = vec2(50,100)*64;
 
                 let mut paragraph = text_engine::StyledParagraph::default();
-                paragraph.add(&english, &style_h1,  "Hållo, World ");
-                paragraph.add(&english, &style_s1,  "Thüs ");
-                paragraph.add(&english, &style_s2h, "is rendering ");
-                paragraph.add(&english, &style_s2,  "fidelity. ");
-                paragraph.add(&english, &style_s2s, "fidelity. ");
-                paragraph.add(&english, &style_s3,  "Here's a serif ");
-                paragraph.add(&english, &style_h2,  "And.");
+                paragraph.add(&english, &style_h1,  "Hållo, World! How do you spell Пётр Кропоткин?");
+                paragraph.add(&english, &style_s1,  "There was no cleavage between the man and his world. He spoke and acted in all things as he felt and believed and wrote. Kropotkin was a whole man. ");
+                paragraph.add(&english, &style_s2,  "The economic change which will result from the Social Revolution will be so immense and so profound, it must so change all the relations based today on property and exchange, that it is impossible for one or any individual to elaborate the different social forms, which must spring up in the society of the future. ");
+                paragraph.add(&english, &style_s3,  "Here's a serif font. ");
+                paragraph.add(&english, &style_h2,  "wololo");
 
-                let text = text_engine.render_text(&mut cursor, left, right, &paragraph);
+                let text = text_engine.render_text(&mut cursor, line_width, &paragraph);
                 //text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_engine.glyph_cache.current_x as i16, 50, 0, 0, gb_yellow)); // debug: visualize glyph_cache
 
                 let mut frame = renderer.wait_and_begin_frame();
