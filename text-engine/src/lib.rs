@@ -4,7 +4,7 @@ use freetype as ft;
 use harfbuzz_sys as hb;
 use hb::hb_glyph_info_t;
 use std::{collections::HashMap, fmt::Write};
-use common::{Color,Vertex,vec2,div_round,gen_quad};
+use common::*;
 
 // freetype integration of harfbuzz_sys 0.6.1 is missing these bindings
 #[link(name="harfbuzz")]
@@ -335,13 +335,16 @@ impl TextEngine {
         }
     }
 
-    pub fn render_paragraph(  &mut self,
-            cursor:      &mut vec2<i32>,
-            max_line_width:  i32,
-            parskip_perc:  i32,
-            styled_text: &StyledParagraph) -> Text {
+    pub fn render_paragraph( &mut self,
+            cursor_f:        &mut Vec2<f32>,
+            max_line_width:  f32,
+            parskip_factor:  f32,
+            styled_text:    &StyledParagraph) -> Text {
         use hb::*;
-        let left_margin = cursor.0;
+        let mut cursor : Vec2<i32> = cursor_f.map(|o|(o*64.0).round() as i32);
+        let left_margin = cursor.x;
+
+        let max_line_width = (max_line_width*64.0).round() as i32;
 
         let (shaped_glyphs,max_lineskip) = self.shape_styled_paragraph(&styled_text);
         let styles = gen_style_segmentation(&styled_text, &shaped_glyphs);
@@ -368,7 +371,7 @@ impl TextEngine {
         }
 
         // render
-        cursor.1 += (max_lineskip*parskip_perc)/100;
+        cursor.y += ((max_lineskip as f32)*parskip_factor).round() as i32;
         let mut ret = Text::default();
         let mut break_points_iter = break_points.iter();
         let mut next_break_point = *break_points_iter.next().unwrap();
@@ -379,22 +382,23 @@ impl TextEngine {
             font.apply_style(style);
 
             for ((l,r),&(info,pos)) in &mut shaped_glyph_iter {
-                self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
+                self.rasterize_glyph(&mut ret, style, cursor, info, pos);
 
                 if r==next_break_point {
                     println!("newline: {l}~{r}");
-                    cursor.0 = left_margin;
-                    cursor.1 += max_lineskip;
+                    cursor.x = left_margin;
+                    cursor.y += max_lineskip;
                     next_break_point = *break_points_iter.next().unwrap_or(&0);
                 } else {
-                    cursor.0 += pos.x_advance;
+                    cursor.x += pos.x_advance;
                 }
 
                 if style_r==r { break }
             }
         }
+        println!("{cursor} -> {}", cursor.map(|o|o as f32/64.0));
 
-        cursor.0 = left_margin;
+        *cursor_f = vec2(left_margin, cursor.y)/64.0;
         ret
     }
 
@@ -475,12 +479,12 @@ impl TextEngine {
         std::iter::zip(glyph_infos, glyph_positons).map(|(i,p)|(*i,*p)).collect()
     }
 
-    fn rasterize_glyph(&mut self, ret: &mut Text, style: &Style, cursor: vec2<i32>, info: hb::hb_glyph_info_t, pos: hb::hb_glyph_position_t){
+    fn rasterize_glyph(&mut self, ret: &mut Text, style: &Style, cursor: Vec2<i32>, info: hb::hb_glyph_info_t, pos: hb::hb_glyph_position_t){
         let font = &self.fonts[style.font_idx as usize];
 
         let id = info.codepoint; // actually glyph index, not codepoint
-        let x = div_round((cursor.0 + pos.x_offset)*style.subpixel, 64);
-        let y = div_round( cursor.1 + pos.y_offset , 64);
+        let x = div_round((cursor.x + pos.x_offset)*style.subpixel, 64);
+        let y = div_round( cursor.y + pos.y_offset , 64);
         let x_frac = x%style.subpixel;
         let x = x/style.subpixel;
 

@@ -10,7 +10,7 @@ impl Color{
     pub const CLEAR:Color = Color{r:0x00, g:0x00, b:0x00, a:0x00};
     pub const WHITE:Color = Color{r:0xFF, g:0xFF, b:0xFF, a:0xFF};
     pub const BLACK:Color = Color{r:0x00, g:0x00, b:0x00, a:0xFF};
-    pub fn srgb8(r:u8, g:u8, b:u8, a:u8) -> Self{ Self{r,g,b,a} }
+    pub const fn srgb8(r:u8, g:u8, b:u8, a:u8) -> Self{ Self{r,g,b,a} }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -36,7 +36,11 @@ pub fn gen_quad(x: i16, y: i16, w: i16, h: i16, u:u16, v:u16, color: Color) -> [
     ]
 }
 
-pub fn gen_rect(x:i16, y:i16, w:i16, h:i16, color: Color) -> [Vertex;4] {
+pub fn gen_rect(position:Vec2<f32>, extent:Vec2<f32>, color: Color) -> [Vertex;4] {
+    let x = position.x.round() as i16;
+    let y = position.y.round() as i16;
+    let w = extent.x.round()   as i16;
+    let h = extent.y.round()   as i16;
     assert!(w > 0);
     assert!(h > 0);
     [
@@ -51,7 +55,9 @@ pub fn div_round(a:i32, b:i32) -> i32 { (a+(b/2))/b }
 
 use core::ops::*;
 
+/*
 // Freetype uses this fixed point format a lot, and it's a good for pixel calculations.
+// type conversions become unergonomic. keep out of public interface
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
 #[derive(Clone,Copy)]
@@ -97,52 +103,92 @@ impl std::fmt::Display for i32q6 {
         }
     }
 }
+*/
 
-pub trait Dot<T>{ fn dot(&self, rhs:Self) -> T; }
+// make vec2() ergonomic to use by automatically coercing
+pub trait CoerceToF32   { fn as_f32(self) -> f32; }
+impl CoerceToF32 for f32   { fn as_f32(self) -> f32 { self } }
+impl CoerceToF32 for f64   { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for u8    { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for i8    { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for i16   { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for u16   { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for i32   { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for u32   { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for i64   { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for u64   { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for i128  { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for u128  { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for isize { fn as_f32(self) -> f32 { self as f32 } }
+impl CoerceToF32 for usize { fn as_f32(self) -> f32 { self as f32 } }
 
-#[allow(non_camel_case_types)]
-#[derive(Clone,Copy)]
-pub struct vec2<T>(pub T,pub T) where T:Clone+Copy;
-impl<T> Add for vec2<T> where T:Clone+Copy+Add<Output=T> { type Output=Self; fn add(self, rhs: Self) -> Self { Self(self.0+rhs.0, self.1+rhs.1) } }
-impl<T> Sub for vec2<T> where T:Clone+Copy+Sub<Output=T> { type Output=Self; fn sub(self, rhs: Self) -> Self { Self(self.0-rhs.0, self.1-rhs.1) } }
-impl<T> Mul<T> for vec2<T> where T:Clone+Copy+Mul<Output=T> { type Output=Self; fn mul(self, rhs: T) -> Self { Self(self.0*rhs, self.1*rhs) } }
-impl<T> Div<T> for vec2<T> where T:Clone+Copy+Div<Output=T> { type Output=Self; fn div(self, rhs: T) -> Self { Self(self.0/rhs, self.1/rhs) } }
-impl<T,U> AddAssign<vec2<U>> for vec2<T> where T:Clone+Copy+AddAssign<U>, U:Clone+Copy { fn add_assign(&mut self, rhs: vec2<U>) { self.0 += rhs.0; self.1 += rhs.1; } }
-impl<T,U> SubAssign<vec2<U>> for vec2<T> where T:Clone+Copy+SubAssign<U>, U:Clone+Copy { fn sub_assign(&mut self, rhs: vec2<U>) { self.0 -= rhs.0; self.1 -= rhs.1; } }
-
-impl<T> Dot<T> for vec2<T> where T:Clone+Copy+Mul<T,Output=T>+Add<T,Output=T> {
-    fn dot(&self, rhs:vec2<T>) -> T { self.0 * rhs.0 + self.1 * rhs.1 }
+pub fn vec2<X,Y>(x:X,y:Y) -> Vec2<f32>
+    where X:Clone+Copy+CoerceToF32,
+          Y:Clone+Copy+CoerceToF32 {
+    Vec2{ x:x.as_f32(), y:y.as_f32() }
 }
-impl<T> BitXor<vec2<T>> for vec2<T> where T:Clone+Copy+Mul<T,Output=T>+Sub<T,Output=T> {
-    type Output = bivec2<T>;
-    fn bitxor(self, rhs: vec2<T>) -> Self::Output {
-        bivec2(self.0*rhs.1-self.1*rhs.0)
+
+pub fn vec2t<T,X,Y>(x:X,y:Y) -> Vec2<T>
+    where X:Clone+Copy+Into<T>,
+          Y:Clone+Copy+Into<T>,
+          T:Clone+Copy{
+    Vec2{ x:x.into(), y:y.into() }
+}
+
+#[derive(Clone,Copy)]
+pub struct Vec2<T> where T:Clone+Copy {
+    pub x: T, 
+    pub y: T,
+}
+
+impl<T> Vec2<T> where T:Clone+Copy {
+    pub fn map<R>(&self, f:impl Fn(T)->R)->Vec2<R> where R:Clone+Copy {
+        Vec2{ x: f(self.x), y: f(self.y) }
+    }
+    pub fn map2<R,U>(&self, rhs: Vec2<U>, f:impl Fn(T,U)->R)->Vec2<R> where U:Clone+Copy, R:Clone+Copy {
+        Vec2{ x: f(self.x, rhs.x), y: f(self.y, rhs.y) }
     }
 }
 
-impl<T> std::fmt::Display for vec2<T> where T:Clone+Copy+std::fmt::Display {
+impl<T> Add for Vec2<T> where T:Clone+Copy+Add<Output=T> { type Output=Self; fn add(self, rhs: Self) -> Self { self.map2(rhs,|a,b|a+b) } }
+impl<T> Sub for Vec2<T> where T:Clone+Copy+Sub<Output=T> { type Output=Self; fn sub(self, rhs: Self) -> Self { self.map2(rhs,|a,b|a-b) } }
+impl<T> Mul<T> for Vec2<T> where T:Clone+Copy+Mul<Output=T> { type Output=Self; fn mul(self, rhs: T) -> Self { vec2t(self.x*rhs, self.y*rhs) } }
+impl<T> Div<T> for Vec2<T> where T:Clone+Copy+Div<Output=T> { type Output=Self; fn div(self, rhs: T) -> Self { vec2t(self.x/rhs, self.y/rhs) } }
+impl<T,U> AddAssign<Vec2<U>> for Vec2<T> where T:Clone+Copy+AddAssign<U>, U:Clone+Copy { fn add_assign(&mut self, rhs: Vec2<U>) { self.x += rhs.x; self.y += rhs.y; } }
+impl<T,U> SubAssign<Vec2<U>> for Vec2<T> where T:Clone+Copy+SubAssign<U>, U:Clone+Copy { fn sub_assign(&mut self, rhs: Vec2<U>) { self.x -= rhs.x; self.y -= rhs.y; } }
+
+pub trait InnerProduct<T>{ fn dot(&self, rhs:Self) -> T; }
+impl<T> InnerProduct<T> for Vec2<T> where T:Clone+Copy+Mul<T,Output=T>+Add<T,Output=T> {
+    fn dot(&self, rhs:Vec2<T>) -> T { self.x * rhs.x + self.y * rhs.y }
+}
+impl<T> BitXor<Vec2<T>> for Vec2<T> where T:Clone+Copy+Mul<T,Output=T>+Sub<T,Output=T> {
+    type Output = BiVec2<T>;
+    fn bitxor(self, rhs: Vec2<T>) -> Self::Output {
+        BiVec2{xy:self.x*rhs.y-self.y*rhs.x}
+    }
+}
+
+impl<T> std::fmt::Display for Vec2<T> where T:Clone+Copy+std::fmt::Display {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("(")?; self.0.fmt(f)?; f.write_str(",")?; self.1.fmt(f)?; f.write_str(")")
+        f.write_str("(")?; self.x.fmt(f)?; f.write_str(",")?; self.y.fmt(f)?; f.write_str(")")
     }
 }
 
-#[allow(non_camel_case_types)]
 #[derive(Clone,Copy)]
-pub struct bivec2<T>(pub T) where T:Clone+Copy;
+pub struct BiVec2<T> where T:Clone+Copy {pub xy: T}
 
-#[allow(non_camel_case_types)]
 #[derive(Clone,Copy)]
-pub struct rotor2<T>(pub vec2<T>,pub bivec2<T>) where T:Clone+Copy;
+pub struct Rotor2<T>(pub Vec2<T>,pub BiVec2<T>) where T:Clone+Copy;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn i32q6() {
-        assert_eq!(13,    13.q6().i32());
-        assert_eq!(15*64+64/4, 15.25.q6().0);
-        assert_eq!(15.25, 15.25.q6().f32());
-        assert_eq!(15.5, 15.5.q6().f32());
-        assert_eq!(-15.5, -15.5.q6().f32());
-    }
+    //#[test]
+    //fn i32q6() {
+    //    assert_eq!(13,    13.q6().i32());
+    //    assert_eq!(15*64+64/4, 15.25.q6().0);
+    //    assert_eq!(15.25, 15.25.q6().f32());
+    //    assert_eq!(15.5, 15.5.q6().f32());
+    //    assert_eq!(-15.5, -15.5.q6().f32());
+    //}
 }

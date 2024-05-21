@@ -1,4 +1,4 @@
-use common::{Color,Vertex,vec2};
+use common::*;
 use text_engine::*;
 
 use core::{ mem::{transmute,size_of}, ptr::write_volatile, ffi::c_void };
@@ -190,8 +190,8 @@ impl ApplicationHandler for App {
                 let style_s3  = Style{ features, color:gb_yellow, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 300 };
                 let style_h2  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 3, size: 18, weight: 250 };
 
-                let line_width = 600*64;
-                let mut cursor = vec2(50,100)*64;
+                let line_width = 600.0;
+                let mut cursor = vec2(50.0,100.0);
                 let cursor_s = cursor;
 
                 let mut paragraph = text_engine::StyledParagraph::default();
@@ -201,12 +201,15 @@ impl ApplicationHandler for App {
                 paragraph.add(&english, &style_s3,  "Here's a serif font. ");
                 paragraph.add(&english, &style_h2,  "wololo");
 
-                let mut text = text_engine.render_paragraph(&mut cursor, line_width, 135, &paragraph);
-                text.quads.insert(0, common::gen_rect(50, 0, (line_width/64) as i16, winsize.height as i16, Color::srgb8(16, 16, 16, 0xFF)) );
-                text.quads.push( common::gen_rect(((cursor_s.0/64)-10-10) as i16, ((cursor_s.1/64)- 5) as i16, 10,  5, Color::srgb8(22, 22, 22, 0xFF)) );
-                text.quads.push( common::gen_rect(((cursor_s.0/64)- 5-10) as i16, ((cursor_s.1/64)-10) as i16,  5, 10, Color::srgb8(22, 22, 22, 0xFF)) );
-                text.quads.push( common::gen_rect(((cursor.0/64)-10-10)   as i16, (cursor.1/64) as i16, 10, 5, Color::srgb8(22, 22, 22, 0xFF)) );
-                text.quads.push( common::gen_rect(((cursor.0/64)- 5-10)   as i16, (cursor.1/64) as i16, 5, 10, Color::srgb8(22, 22, 22, 0xFF)) );
+                let mut text = text_engine.render_paragraph(&mut cursor, line_width, 1.0, &paragraph);
+                println!("{cursor_s} -> {cursor}");
+                text.quads.insert(0, gen_rect(cursor_s, vec2(line_width, win_h), Color::srgb8(16, 16, 16, 0xFF)) );
+
+                text.quads.push(gen_rect(cursor_s-vec2(10, 5), vec2(10, 5), Color::srgb8(0xFF, 0xFF, 0, 0xFF)) );
+                text.quads.push(gen_rect(cursor_s-vec2( 5,10), vec2( 5,10), Color::srgb8(0xFF, 0xFF, 0, 0xFF)) );
+
+                text.quads.push(gen_rect(cursor-vec2(10, 0), vec2(10, 5), Color::srgb8(0xFF, 0xFF, 0, 0xFF)) );
+                text.quads.push(gen_rect(cursor-vec2( 5, 0), vec2( 5,10), Color::srgb8(0xFF, 0xFF, 0, 0xFF)) );
 
 
                 let mut frame = renderer.wait_and_begin_frame();
