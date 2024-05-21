@@ -1,4 +1,4 @@
-#![feature(const_trait_impl)]
+#![feature(const_trait_impl, const_fn_floating_point_arithmetic)]
 // TODO: think about colors. Right now Color means sRGBA8
 // maybe have f32 oklab colors internally and use .srgba8() to convert?
 #[derive(Debug, Clone, Copy)]
@@ -51,7 +51,7 @@ pub fn gen_rect(position:Vec2<f32>, extent:Vec2<f32>, color: Color) -> [Vertex;4
     ]
 }
 
-pub fn div_round(a:i32, b:i32) -> i32 { (a+(b/2))/b }
+pub const fn div_round(a:i32, b:i32) -> i32 { (a+(b/2))/b }
 
 use core::ops::*;
 
@@ -106,21 +106,21 @@ impl std::fmt::Display for i32q6 {
 */
 
 // make vec2() ergonomic to use by automatically coercing
-pub trait CoerceToF32   { fn as_f32(self) -> f32; }
-impl CoerceToF32 for f32   { fn as_f32(self) -> f32 { self } }
-impl CoerceToF32 for f64   { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for u8    { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for i8    { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for i16   { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for u16   { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for i32   { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for u32   { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for i64   { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for u64   { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for i128  { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for u128  { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for isize { fn as_f32(self) -> f32 { self as f32 } }
-impl CoerceToF32 for usize { fn as_f32(self) -> f32 { self as f32 } }
+pub trait CoerceToF32 { fn as_f32(self) -> f32; }
+impl const CoerceToF32 for f32   { fn as_f32(self) -> f32 { self } }
+impl const CoerceToF32 for f64   { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for u8    { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for i8    { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for i16   { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for u16   { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for i32   { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for u32   { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for i64   { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for u64   { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for i128  { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for u128  { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for isize { fn as_f32(self) -> f32 { self as f32 } }
+impl const CoerceToF32 for usize { fn as_f32(self) -> f32 { self as f32 } }
 
 pub fn vec2<X,Y>(x:X,y:Y) -> Vec2<f32>
     where X:Clone+Copy+CoerceToF32,
@@ -150,12 +150,12 @@ impl<T> Vec2<T> where T:Clone+Copy {
     }
 }
 
-impl<T> Add for Vec2<T> where T:Clone+Copy+Add<Output=T> { type Output=Self; fn add(self, rhs: Self) -> Self { self.map2(rhs,|a,b|a+b) } }
-impl<T> Sub for Vec2<T> where T:Clone+Copy+Sub<Output=T> { type Output=Self; fn sub(self, rhs: Self) -> Self { self.map2(rhs,|a,b|a-b) } }
-impl<T> Mul<T> for Vec2<T> where T:Clone+Copy+Mul<Output=T> { type Output=Self; fn mul(self, rhs: T) -> Self { vec2t(self.x*rhs, self.y*rhs) } }
-impl<T> Div<T> for Vec2<T> where T:Clone+Copy+Div<Output=T> { type Output=Self; fn div(self, rhs: T) -> Self { vec2t(self.x/rhs, self.y/rhs) } }
-impl<T,U> AddAssign<Vec2<U>> for Vec2<T> where T:Clone+Copy+AddAssign<U>, U:Clone+Copy { fn add_assign(&mut self, rhs: Vec2<U>) { self.x += rhs.x; self.y += rhs.y; } }
-impl<T,U> SubAssign<Vec2<U>> for Vec2<T> where T:Clone+Copy+SubAssign<U>, U:Clone+Copy { fn sub_assign(&mut self, rhs: Vec2<U>) { self.x -= rhs.x; self.y -= rhs.y; } }
+impl<T>   const Add for Vec2<T> where T:Clone+Copy+Add<Output=T> { type Output=Self; fn add(self, rhs: Self) -> Self { self.map2(rhs,|a,b|a+b) } }
+impl<T>   const Sub for Vec2<T> where T:Clone+Copy+Sub<Output=T> { type Output=Self; fn sub(self, rhs: Self) -> Self { self.map2(rhs,|a,b|a-b) } }
+impl<T>   const Mul<T> for Vec2<T> where T:Clone+Copy+Mul<Output=T> { type Output=Self; fn mul(self, rhs: T) -> Self { vec2t(self.x*rhs, self.y*rhs) } }
+impl<T>   const Div<T> for Vec2<T> where T:Clone+Copy+Div<Output=T> { type Output=Self; fn div(self, rhs: T) -> Self { vec2t(self.x/rhs, self.y/rhs) } }
+impl<T,U> const AddAssign<Vec2<U>> for Vec2<T> where T:Clone+Copy+AddAssign<U>, U:Clone+Copy { fn add_assign(&mut self, rhs: Vec2<U>) { self.x += rhs.x; self.y += rhs.y; } }
+impl<T,U> const SubAssign<Vec2<U>> for Vec2<T> where T:Clone+Copy+SubAssign<U>, U:Clone+Copy { fn sub_assign(&mut self, rhs: Vec2<U>) { self.x -= rhs.x; self.y -= rhs.y; } }
 
 pub trait InnerProduct<T>{ fn dot(&self, rhs:Self) -> T; }
 impl<T> InnerProduct<T> for Vec2<T> where T:Clone+Copy+Mul<T,Output=T>+Add<T,Output=T> {

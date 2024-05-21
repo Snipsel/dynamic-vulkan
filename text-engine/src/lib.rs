@@ -69,6 +69,7 @@ struct GlyphCacheKey{
     font_idx  : u32,
     glyph_idx : u32,
     font_size : u32,
+    font_weight: u32,
     subpixel  : u32,
     autohint  : bool,
 }
@@ -107,6 +108,36 @@ pub struct Text{
     pub quads          : Vec<[Vertex;4]>,
     pub buffer_updates : Vec<BufferImageCopy>,
     pub pixels         : Vec<u8>,
+}
+impl Text{
+    pub fn append(&mut self, rhs:Text){
+        self.quads.extend(&rhs.quads);
+        let px_offset = self.pixels.len();
+        self.pixels.extend(&rhs.pixels);
+        for mut bu in rhs.buffer_updates {
+            bu.buffer_offset += px_offset as u64;
+            self.buffer_updates.push(bu);
+        }
+    }
+    pub fn draw_hook_top_left(&mut self, origin:Vec2<f32>, color: Color){
+        self.quads.push(gen_rect(origin-vec2(10, 5), vec2(10, 5), color) );
+        self.quads.push(gen_rect(origin-vec2( 5,10), vec2( 5,10), color) );
+    }
+
+    pub fn draw_hook_top_right(&mut self, origin:Vec2<f32>, color: Color){
+        self.quads.push(gen_rect(origin-vec2( 0, 5), vec2(10, 5), color));
+        self.quads.push(gen_rect(origin-vec2( 0,10), vec2( 5,10), color));
+    }
+
+    pub fn draw_hook_bottom_left(&mut self, origin:Vec2<f32>, color: Color){
+        self.quads.push(gen_rect(origin-vec2(10, 0), vec2(10, 5), color) );
+        self.quads.push(gen_rect(origin-vec2( 5, 0), vec2( 5,10), color) );
+    }
+
+    pub fn draw_hook_bottom_right(&mut self, origin:Vec2<f32>, color: Color){
+        self.quads.push(gen_rect(origin, vec2(10, 5), color) );
+        self.quads.push(gen_rect(origin, vec2( 5,10), color) );
+    }
 }
 
 #[derive(Clone,Copy,PartialEq)]
@@ -339,7 +370,7 @@ impl TextEngine {
             cursor_f:        &mut Vec2<f32>,
             max_line_width:  f32,
             parskip_factor:  f32,
-            styled_text:    &StyledParagraph) -> Text {
+            styled_text:     &StyledParagraph) -> Text {
         use hb::*;
         let mut cursor : Vec2<i32> = cursor_f.map(|o|(o*64.0).round() as i32);
         let left_margin = cursor.x;
@@ -374,7 +405,7 @@ impl TextEngine {
         cursor.y += ((max_lineskip as f32)*parskip_factor).round() as i32;
         let mut ret = Text::default();
         let mut break_points_iter = break_points.iter();
-        let mut next_break_point = *break_points_iter.next().unwrap();
+        let mut next_break_point = *break_points_iter.next().unwrap_or(&u32::MAX);
         let mut shaped_glyph_iter = shaped_glyphs.iter();
         for ((_,style_r),&style) in styles.iter() {
 
@@ -491,7 +522,7 @@ impl TextEngine {
         let frac64 = (x_frac*64/style.subpixel) as u32;
         //println!("{x:4}+{x_frac:2}/{:2} = {frac64:2}/64", style.subpixel);
 
-        if let Some(entry) = self.glyph_cache.get(&GlyphCacheKey{font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}) {
+        if let Some(entry) = self.glyph_cache.get(&GlyphCacheKey{font_idx:style.font_idx, glyph_idx:id, font_size:style.size, font_weight:style.weight, autohint:style.autohint, subpixel:frac64}) {
             if !(entry.width<=0 || entry.height<=0) { // invisible character, ignore for rendering
                 ret.quads.push(
                     gen_quad(x as i16 + entry.left,
@@ -515,7 +546,7 @@ impl TextEngine {
             if !(width<=0 || height<=0) { 
                 assert_eq!(ret.pixels.len()%4, 0);
                 let buffer_offset = ret.pixels.len() as u64;
-                let uv = self.glyph_cache.insert( GlyphCacheKey{ font_idx:style.font_idx, glyph_idx:id, font_size:style.size, autohint:style.autohint, subpixel:frac64}, 
+                let uv = self.glyph_cache.insert( GlyphCacheKey{ font_idx:style.font_idx, glyph_idx:id, font_size:style.size, font_weight:style.weight, autohint:style.autohint, subpixel:frac64}, 
                                                       width as u16, height as u16, left as i16, top as i16);
                 // convert to tightly-packed rgba
                 let bitmap_buffer = bitmap.buffer();

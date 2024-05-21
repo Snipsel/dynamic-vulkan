@@ -181,36 +181,54 @@ impl ApplicationHandler for App {
                 let gb_yellow= Color::srgb8(0xfa, 0xbd, 0x2f, 0xFF);
                 let color = gb_aqua;
                 let features = &[];
-                let subpixel = 8;
-                let style_h1  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 0, size: 18, weight: 300 };
+                let subpixel = 4;
+
+                let style_h1  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 0, size: 32, weight: 600 };
+                //let style_h2  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 0, size: 18, weight: 300 };
+
+                let style_s0  = Style{ features, color,           subpixel,   autohint: false, font_idx: 0, size: 21, weight: 400 };
                 let style_s1  = Style{ features, color,           subpixel,   autohint: false, font_idx: 1, size: 21, weight: 400 };
-
                 let style_s2  = Style{ features, color:gb_red,    subpixel,   autohint: false, font_idx: 0, size: 12, weight: 400 };
-
                 let style_s3  = Style{ features, color:gb_yellow, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 300 };
-                let style_h2  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 3, size: 18, weight: 250 };
+                let style_s3b = Style{ features, color:gb_yellow, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 700 };
+                let style_s4  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 3, size: 18, weight: 250 };
+                let style_s5  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 0, size: 18, weight: 400 };
 
                 let line_width = 600.0;
-                let mut cursor = vec2(50.0,100.0);
+                let mut cursor = vec2(50,100);
                 let cursor_s = cursor;
 
-                let mut paragraph = text_engine::StyledParagraph::default();
-                paragraph.add(&english, &style_h1,  "Hållo, World! How do you spell Пётр Кропоткин? ");
-                paragraph.add(&english, &style_s1,  "There was no cleavage between the man and his world. He spoke and acted in all things as he felt and believed and wrote. Kropotkin was a whole man. ");
-                paragraph.add(&english, &style_s2,  "The economic change which will result from the Social Revolution will be so immense and so profound, it must so change all the relations based today on property and exchange, that it is impossible for one or any individual to elaborate the different social forms, which must spring up in the society of the future. ");
-                paragraph.add(&english, &style_s3,  "Here's a serif font. ");
-                paragraph.add(&english, &style_h2,  "wololo");
+                let mut h1 = text_engine::StyledParagraph::default();
+                h1.add(&english, &style_h1, "How do you spell Пётр Кропоткин?");
+                let mut text  = text_engine.render_paragraph(&mut cursor, line_width, 0.5, &h1);
 
-                let mut text = text_engine.render_paragraph(&mut cursor, line_width, 1.0, &paragraph);
+                let mut p1 = text_engine::StyledParagraph::default();
+                p1.add(&english, &style_s0,  "Hållo, World! ");
+                p1.add(&english, &style_s2,  "There was no cleavage between the man and his world. He spoke and acted in all things as he felt and believed and wrote. Kropotkin was a whole man. ");
+                p1.add(&english, &style_s1,  "The economic change which will result from the Social Revolution will be so immense and so profound, it must so change all the relations based today on property and exchange, that it is impossible for one or any individual to elaborate the different social forms, which must spring up in the society of the future. ");
+                p1.add(&english, &style_s3,  "Here's a serif font. ");
+                p1.add(&english, &style_s4,  "wololo");
+                text.append(text_engine.render_paragraph(&mut cursor, line_width, 1.5, &p1));
+
+                let mut p2 = text_engine::StyledParagraph::default();
+                p2.add(&english, &style_s3,  "A printable character results in output when rendered, but a whitespace character does not. Instead, whitespace characters define the layout of text to a limited degree – interrupting the normal sequence of ");
+                p2.add(&english, &style_s3b, "rendering characters");
+                p2.add(&english, &style_s3, " next to each other. The output of subsequent characters is typically shifted to the right (or to the left for right-to-left script) or to the start of the next line. The effect of multiple sequential whitespace characters is cumulative such that the next printable character is rendered in a location based on the accumulated effect of preceding whitespace characters. ");
+                text.append(text_engine.render_paragraph(&mut cursor, line_width, 1.5, &p2));
+
+                let mut p3 = text_engine::StyledParagraph::default();
+                p3.add(&english, &style_s5,  "Whenever we make a new library project with Cargo, a test module with a test function in it is automatically generated for us. This module gives you a template for writing your tests so you don’t have to look up the exact structure and syntax every time you start a new project. You can add as many additional test functions and as many test modules as you want!");
+                text.append(text_engine.render_paragraph(&mut cursor, line_width, 1.5, &p3));
+
+
                 println!("{cursor_s} -> {cursor}");
-                text.quads.insert(0, gen_rect(cursor_s, vec2(line_width, win_h), Color::srgb8(16, 16, 16, 0xFF)) );
+                //text.quads.insert(0, gen_rect(cursor_s, vec2(line_width, cursor.y-cursor_s.y), Color::srgb8(16, 16, 16, 0xFF)) );
 
-                text.quads.push(gen_rect(cursor_s-vec2(10, 5), vec2(10, 5), Color::srgb8(0xFF, 0xFF, 0, 0xFF)) );
-                text.quads.push(gen_rect(cursor_s-vec2( 5,10), vec2( 5,10), Color::srgb8(0xFF, 0xFF, 0, 0xFF)) );
-
-                text.quads.push(gen_rect(cursor-vec2(10, 0), vec2(10, 5), Color::srgb8(0xFF, 0xFF, 0, 0xFF)) );
-                text.quads.push(gen_rect(cursor-vec2( 5, 0), vec2( 5,10), Color::srgb8(0xFF, 0xFF, 0, 0xFF)) );
-
+                // top left
+                text.draw_hook_top_left    (cursor_s,                    Color::srgb8(0xFF, 0xFF, 0, 0xFF));
+                text.draw_hook_top_right   (cursor_s+vec2(line_width,0), Color::srgb8(0xFF, 0xFF, 0, 0xFF));
+                text.draw_hook_bottom_left (cursor,                      Color::srgb8(0xFF, 0xFF, 0, 0xFF));
+                text.draw_hook_bottom_right(cursor  +vec2(line_width,0), Color::srgb8(0xFF, 0xFF, 0, 0xFF));
 
                 let mut frame = renderer.wait_and_begin_frame();
 
@@ -258,16 +276,6 @@ impl ApplicationHandler for App {
                 ]);
 
                 frame.set_color_blend_enable(&[1]);
-                /* frame.set_color_blend_equation(&[
-                    vk::ColorBlendEquationEXT::default()
-                        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-                        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-                        .color_blend_op(vk::BlendOp::ADD)
-                        .src_alpha_blend_factor(vk::BlendFactor::ONE)
-                        .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
-                        .alpha_blend_op(vk::BlendOp::ADD)
-                ]); */
-
                 // component-alpha blending
                 frame.set_color_blend_equation(&[
                     vk::ColorBlendEquationEXT::default()
