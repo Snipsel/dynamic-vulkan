@@ -201,6 +201,7 @@ impl<'style> StyledParagraph<'style>{
         let input = if begin==0 { input.trim_start() } else { input };
         Self::NFD.normalize_to(input, &mut self.text);
         let end = self.text.len() as u32;
+        println!("[{}]", self.str(begin,end));
         self.runs.push((&locale,style,begin,end));
     }
 
@@ -334,16 +335,15 @@ impl TextEngine {
         }
     }
 
-    pub fn render_text(  &mut self,
+    pub fn render_paragraph(  &mut self,
             cursor:      &mut vec2<i32>,
-            line_width:  i32,
+            max_line_width:  i32,
+            parskip_perc:  i32,
             styled_text: &StyledParagraph) -> Text {
         use hb::*;
-        let mut ret = Text::default();
-
         let left_margin = cursor.0;
 
-        let shaped_glyphs = self.shape_styled_paragraph(&styled_text);
+        let (shaped_glyphs,max_lineskip) = self.shape_styled_paragraph(&styled_text);
         let styles = gen_style_segmentation(&styled_text, &shaped_glyphs);
 
         let mut break_opportunities = self.line_break_lengths(styled_text, &shaped_glyphs);
@@ -355,10 +355,11 @@ impl TextEngine {
         }
         let break_opportunities = break_opportunities;
 
+        // greedy line-break
         let mut break_points = Vec::new();
         let mut length_so_far = 0;
         for ([l,m,r],[word_width,space_width]) in break_opportunities.chunk2(){
-            if length_so_far + word_width > line_width {
+            if length_so_far + word_width > max_line_width {
                 break_points.push(l);
                 length_so_far = word_width+space_width;
             }else{
@@ -367,32 +368,34 @@ impl TextEngine {
         }
 
         // render
-        {
-            let mut break_points_iter = break_points.iter();
-            let mut next_break_point = *break_points_iter.next().unwrap();
-            let mut shaped_glyph_iter = shaped_glyphs.iter();
-            for ((style_l,style_r),&style) in styles.iter() {
+        cursor.1 += (max_lineskip*parskip_perc)/100;
+        let mut ret = Text::default();
+        let mut break_points_iter = break_points.iter();
+        let mut next_break_point = *break_points_iter.next().unwrap();
+        let mut shaped_glyph_iter = shaped_glyphs.iter();
+        for ((_,style_r),&style) in styles.iter() {
 
-                let font = &mut self.fonts[style.font_idx as usize];
-                font.apply_style(style);
+            let font = &mut self.fonts[style.font_idx as usize];
+            font.apply_style(style);
 
-                for ((l,r),&(info,pos)) in &mut shaped_glyph_iter {
-                    self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
+            for ((l,r),&(info,pos)) in &mut shaped_glyph_iter {
+                self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
 
-                    if r==next_break_point {
-                        println!("newline: {l}~{r}");
-                        cursor.0 = left_margin;
-                        cursor.1 += 40*64;
-                        next_break_point = *break_points_iter.next().unwrap_or(&0);
-                    } else {
-                        cursor.0 += pos.x_advance;
-                    }
-
-                    if style_r==r { break }
+                if r==next_break_point {
+                    println!("newline: {l}~{r}");
+                    cursor.0 = left_margin;
+                    cursor.1 += max_lineskip;
+                    next_break_point = *break_points_iter.next().unwrap_or(&0);
+                } else {
+                    cursor.0 += pos.x_advance;
                 }
+
+                if style_r==r { break }
             }
-            return ret;
         }
+
+        cursor.0 = left_margin;
+        ret
     }
 
     // Returns array of line-break indices (inclusive), and an array of segment-lengths.
@@ -417,13 +420,21 @@ impl TextEngine {
         Segmentation{index:linebreaks.index, data:ret}
     }
 
-    fn shape_styled_paragraph(&mut self, styled_text :&StyledParagraph) -> Segmentation<HbGlyph> {
+    fn shape_styled_paragraph(&mut self, styled_text :&StyledParagraph) -> (Segmentation<HbGlyph>,i32) {
+        let mut max_lineskip = 0;
         let mut shaped_glyphs :Vec<HbGlyph> = Vec::new();
         let mut cluster_offset = 0;
         for &(locale,style,begin,end) in styled_text.runs.iter() {
             let text = styled_text.str(begin,end);
             let font = &mut self.fonts[style.font_idx as usize];
             font.apply_style(style);
+
+            let mut extents = unsafe{core::mem::MaybeUninit::<hb::hb_font_extents_t>::zeroed().assume_init()};
+            unsafe{hb::hb_font_get_extents_for_direction(font.hb_font, locale.segment_properties.direction, core::ptr::addr_of_mut!(extents))};
+            let lineskip = extents.line_gap + extents.ascender - extents.descender;
+            println!("{lineskip:6} <- line gap: {gap}, asc:{asc}, desc:{desc}", gap=extents.line_gap, asc=extents.ascender, desc=extents.descender);
+            max_lineskip = max_lineskip.max(lineskip);
+
             let features = style.features();
             let mut local_shaped_glyphs = self.shape_text_run(locale, style.font_idx, &features, text);
             for (info,pos) in local_shaped_glyphs.iter_mut() {
@@ -437,7 +448,7 @@ impl TextEngine {
             .map(|&(info,pos)|info.cluster)
             .chain(std::iter::once(styled_text.text.len() as u32))
             .collect();
-        Segmentation{ data: shaped_glyphs, index: shaped_glyphs_index }
+        (Segmentation{ data: shaped_glyphs, index: shaped_glyphs_index },max_lineskip)
     }
 
     // warning: must call font::apply_style before this

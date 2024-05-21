@@ -182,27 +182,31 @@ impl ApplicationHandler for App {
                 let color = gb_aqua;
                 let features = &[];
                 let subpixel = 8;
-                let style_h1  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 0, size: 48, weight: 300 };
+                let style_h1  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 0, size: 18, weight: 300 };
                 let style_s1  = Style{ features, color,           subpixel,   autohint: false, font_idx: 1, size: 21, weight: 400 };
 
                 let style_s2  = Style{ features, color:gb_red,    subpixel,   autohint: false, font_idx: 0, size: 12, weight: 400 };
 
                 let style_s3  = Style{ features, color:gb_yellow, subpixel,   autohint: false, font_idx: 2, size: 21, weight: 300 };
-                let style_h2  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 3, size: 48, weight: 250 };
+                let style_h2  = Style{ features, color:gb_light,  subpixel,   autohint: false, font_idx: 3, size: 18, weight: 250 };
 
                 let line_width = 600*64;
                 let mut cursor = vec2(50,100)*64;
+                let cursor_s = cursor;
 
                 let mut paragraph = text_engine::StyledParagraph::default();
-                paragraph.add(&english, &style_h1,  "Hållo, World! How do you spell Пётр Кропоткин?");
+                paragraph.add(&english, &style_h1,  "Hållo, World! How do you spell Пётр Кропоткин? ");
                 paragraph.add(&english, &style_s1,  "There was no cleavage between the man and his world. He spoke and acted in all things as he felt and believed and wrote. Kropotkin was a whole man. ");
                 paragraph.add(&english, &style_s2,  "The economic change which will result from the Social Revolution will be so immense and so profound, it must so change all the relations based today on property and exchange, that it is impossible for one or any individual to elaborate the different social forms, which must spring up in the society of the future. ");
                 paragraph.add(&english, &style_s3,  "Here's a serif font. ");
                 paragraph.add(&english, &style_h2,  "wololo");
 
-                let mut text = text_engine.render_text(&mut cursor, line_width, &paragraph);
+                let mut text = text_engine.render_paragraph(&mut cursor, line_width, 135, &paragraph);
                 text.quads.insert(0, common::gen_rect(50, 0, (line_width/64) as i16, winsize.height as i16, Color::srgb8(16, 16, 16, 0xFF)) );
-                text.quads.push( common::gen_rect(30, 100-10, 10, 10, Color::srgb8(16, 16, 16, 0xFF)) );
+                text.quads.push( common::gen_rect(((cursor_s.0/64)-10-10) as i16, ((cursor_s.1/64)- 5) as i16, 10,  5, Color::srgb8(22, 22, 22, 0xFF)) );
+                text.quads.push( common::gen_rect(((cursor_s.0/64)- 5-10) as i16, ((cursor_s.1/64)-10) as i16,  5, 10, Color::srgb8(22, 22, 22, 0xFF)) );
+                text.quads.push( common::gen_rect(((cursor.0/64)-10-10)   as i16, (cursor.1/64) as i16, 10, 5, Color::srgb8(22, 22, 22, 0xFF)) );
+                text.quads.push( common::gen_rect(((cursor.0/64)- 5-10)   as i16, (cursor.1/64) as i16, 5, 10, Color::srgb8(22, 22, 22, 0xFF)) );
 
 
                 let mut frame = renderer.wait_and_begin_frame();
