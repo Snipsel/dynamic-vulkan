@@ -339,6 +339,7 @@ impl TextEngine {
             line_width:  i32,
             styled_text: &StyledParagraph) -> Text {
         use hb::*;
+        let mut ret = Text::default();
 
         let left_margin = cursor.0;
 
@@ -354,24 +355,21 @@ impl TextEngine {
         }
         let break_opportunities = break_opportunities;
 
-        println!("limit: {line_width}");
         let mut break_points = Vec::new();
         let mut length_so_far = 0;
         for ([l,m,r],[word_width,space_width]) in break_opportunities.chunk2(){
             if length_so_far + word_width > line_width {
-                println!("BREAK before {length_so_far}");
-                println!("{l:3}~{m:3} {length_so_far:5}  {:5} [{}] ", length_so_far+word_width, styled_text.str(l,m));
-                break_points.push(length_so_far);
-                length_so_far = 0;
+                break_points.push(l);
+                length_so_far = word_width+space_width;
             }else{
-                println!("{l:3}~{m:3} {length_so_far:5}->{:5} [{}] ", length_so_far+word_width, styled_text.str(l,m));
                 length_so_far += word_width + space_width;
             }
         }
 
         // render
         {
-            let mut ret = Text::default();
+            let mut break_points_iter = break_points.iter();
+            let mut next_break_point = *break_points_iter.next().unwrap();
             let mut shaped_glyph_iter = shaped_glyphs.iter();
             for ((style_l,style_r),&style) in styles.iter() {
 
@@ -379,9 +377,16 @@ impl TextEngine {
                 font.apply_style(style);
 
                 for ((l,r),&(info,pos)) in &mut shaped_glyph_iter {
-
                     self.rasterize_glyph(&mut ret, style, *cursor, info, pos);
-                    cursor.0 += pos.x_advance;
+
+                    if r==next_break_point {
+                        println!("newline: {l}~{r}");
+                        cursor.0 = left_margin;
+                        cursor.1 += 40*64;
+                        next_break_point = *break_points_iter.next().unwrap_or(&0);
+                    } else {
+                        cursor.0 += pos.x_advance;
+                    }
 
                     if style_r==r { break }
                 }

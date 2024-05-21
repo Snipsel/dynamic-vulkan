@@ -330,7 +330,7 @@ impl Renderer {
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::NEAREST)
             .min_filter(vk::Filter::NEAREST)
-            .border_color(vk::BorderColor::INT_TRANSPARENT_BLACK)
+            .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE)
             .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER)
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER)
@@ -806,12 +806,15 @@ impl<'a> Frame<'a> {
             vk::ShaderStageFlags::VERTEX, 0, bytes)};
     }
 
+    pub fn end_rendering(&self) {
+        // end rendering
+        unsafe{self.renderer.khr_dynamic_rendering.cmd_end_rendering(self.renderer.command_buffer)};
+    }
+
     /// returns false if window redraw is required
     pub fn end_frame(self) -> bool {
         let renderer = &self.renderer;
         let swap_idx = self.swap_idx;
-        // end rendering
-        unsafe{renderer.khr_dynamic_rendering.cmd_end_rendering(renderer.command_buffer)};
 
         // end frame
         let image_memory_barriers = [

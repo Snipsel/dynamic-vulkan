@@ -35,6 +35,17 @@ pub fn gen_quad(x: i16, y: i16, w: i16, h: i16, u:u16, v:u16, color: Color) -> [
     ]
 }
 
+pub fn gen_rect(x:i16, y:i16, w:i16, h:i16, color: Color) -> [Vertex;4] {
+    assert!(w > 0);
+    assert!(h > 0);
+    [
+        Vertex{x:x+0,  y:y+0, u:0xFFFF, v:0xFFFF, color}, // top left
+        Vertex{x:x+0,  y:y+h, u:0xFFFF, v:0xFFFF, color}, // bottom left
+        Vertex{x:x+w,  y:y+0, u:0xFFFF, v:0xFFFF, color}, // top right
+        Vertex{x:x+w,  y:y+h, u:0xFFFF, v:0xFFFF, color}, // bottom right
+    ]
+}
+
 pub fn div_round(a:i32, b:i32) -> i32 { (a+(b/2))/b }
 
 use core::ops::*;

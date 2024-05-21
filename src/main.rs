@@ -200,8 +200,10 @@ impl ApplicationHandler for App {
                 paragraph.add(&english, &style_s3,  "Here's a serif font. ");
                 paragraph.add(&english, &style_h2,  "wololo");
 
-                let text = text_engine.render_text(&mut cursor, line_width, &paragraph);
-                //text.quads.push(gen_quad(50, (cursor.1/64) as i16, text_engine.glyph_cache.current_x as i16, 50, 0, 0, gb_yellow)); // debug: visualize glyph_cache
+                let mut text = text_engine.render_text(&mut cursor, line_width, &paragraph);
+                text.quads.insert(0, common::gen_rect(50, 0, (line_width/64) as i16, winsize.height as i16, Color::srgb8(16, 16, 16, 0xFF)) );
+                text.quads.push( common::gen_rect(30, 100-10, 10, 10, Color::srgb8(16, 16, 16, 0xFF)) );
+
 
                 let mut frame = renderer.wait_and_begin_frame();
 
@@ -273,6 +275,8 @@ impl ApplicationHandler for App {
                 frame.bind_descriptor_set(*descriptor_set, *pipeline_layout);
                 frame.push_constant(*pipeline_layout, &[2.0/win_w, 2.0/win_h, win_w/2.0, win_h/2.0]);
                 frame.draw_indexed((quad_count*6) as u32, 0, 0);
+
+                frame.end_rendering();
                 if !frame.end_frame() {
                     window.request_redraw();
                 }
